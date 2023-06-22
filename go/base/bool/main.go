@@ -1,7 +1,9 @@
 package main
 
-func main() {
+import "fmt"
 
+func main() {
+	fmt.Println("hello")
 }
 
 // Btoi bool 类型转换为 int
