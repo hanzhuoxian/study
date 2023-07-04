@@ -1,0 +1,5 @@
+<?php
+
+$url = urldecode('program_id=43353&module=program%2Cmodule&data={"program_info":{"program_id":"433530\'","program_title":"","head_img":"https://statics-cdn-cn.umucdn.cn/statics/image/cover/banner_v3/24.png","desc":"\'","multimedia_type":"0","multimedia_id":"0","tags":[],"open_module":"1","unlock_type":"3","show_type":"2","setup":{"bg_img":"https://statics-cdn-cn.umucdn.cn/statics/image/cover/bg_v3/3.png","skin_data":{"1":{"show_banner":1},"2":{"show_banner":0},"3":{"show_banner":0},"4":{"show_banner":0}},"skin_id":1,"show_banner":1}},"module_list":[{"module_id":"901","module_title":"111222334455","module_desc":"11111","multimedia_type":1,"multimedia_id":"129972","order_index":1,"group_list":[{"id":"73703000000000000000","group_id":"67923869","order_index":0,"lesson_type":"0","is_require":"1"}]},{"module_id":"13482","module_title":"","module_desc":"","multimedia_type":"1","multimedia_id":"0","order_index":2,"group_list":[]}]}');
+
+var_dump($url);die();
