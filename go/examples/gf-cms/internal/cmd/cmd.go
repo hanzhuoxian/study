@@ -7,20 +7,20 @@ import (
 	"github.com/gogf/gf/v2/net/ghttp"
 	"github.com/gogf/gf/v2/os/gcmd"
 
-	"cms/internal/controller"
+	"gf-cms/internal/controller/hello"
 )
 
 var (
 	Main = gcmd.Command{
-		Name:  "main",
-		Usage: "main",
+		Name:  "gf-cms",
+		Usage: "goframe cms",
 		Brief: "start http server",
 		Func: func(ctx context.Context, parser *gcmd.Parser) (err error) {
 			s := g.Server()
 			s.Group("/", func(group *ghttp.RouterGroup) {
 				group.Middleware(ghttp.MiddlewareHandlerResponse)
 				group.Bind(
-					controller.Hello,
+					hello.NewV1(),
 				)
 			})
 			s.Run()

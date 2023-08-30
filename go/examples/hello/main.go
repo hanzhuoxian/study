@@ -1,20 +1,21 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 func main() {
-	fmt.Println("examples hello!")
+	fmt.Println("Hello​World​!")
+	fmt.Println(removeInvisibleChars("Hello​Wo r l d​!"))
 }
 
-func reverseList(head *ListNode) *ListNode {
-	newHead := &ListNode{}
+func removeInvisibleChars(input string) string {
+	// 使用正则表达式匹配不可见字符
+	re := regexp.MustCompile(`\p{C}`)
 
-	for p := head; p != nil; {
-		np := p                //将当前元素保存
-		p = p.Next             //p 指针后移
-		np.Next = newHead.Next // 将当前元素指针指向新链表的第一个元素
-		newHead.Next = np      // head 指向当前元素
-	}
+	// 使用正则表达式替换不可见字符为空字符串
+	filteredText := re.ReplaceAllString(input, "")
 
-	return newHead.Next
+	return filteredText
 }
