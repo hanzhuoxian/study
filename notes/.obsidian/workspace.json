@@ -1,0 +1,157 @@
+{
+  "main": {
+    "id": "b3c4eac167b90ee5",
+    "type": "split",
+    "children": [
+      {
+        "id": "d8b351aae8fdab01",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "79a3db881b735666",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "go/Go 圣经/前言.md",
+                "mode": "preview",
+                "source": true
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "0d10d47a04377d0b",
+    "type": "split",
+    "children": [
+      {
+        "id": "fc6057701048f194",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "08c4b9f1d8436e67",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical"
+              }
+            }
+          },
+          {
+            "id": "c6d66ff39f949831",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              }
+            }
+          },
+          {
+            "id": "87fdbbdff181a6bd",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {}
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "4f43db830a03f0e0",
+    "type": "split",
+    "children": [
+      {
+        "id": "061ad841bec60950",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "9bd433fb1dd48f94",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "go/Go 圣经/前言.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              }
+            }
+          },
+          {
+            "id": "b2a23f119e57211c",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "go/Go 圣经/前言.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              }
+            }
+          },
+          {
+            "id": "c8c4af5f6b4be046",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true
+              }
+            }
+          },
+          {
+            "id": "90793a113976de73",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "go/Go 圣经/前言.md"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false
+    }
+  },
+  "active": "79a3db881b735666",
+  "lastOpenFiles": [
+    "Untitled.canvas",
+    "go/Go 圣经/前言.md",
+    "语言.canvas",
+    "go/基础类型.md",
+    "go/Go 圣经"
+  ]
+}
