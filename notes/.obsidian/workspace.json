@@ -13,7 +13,7 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Electron/起步.md",
+                "file": "go/Go 圣经/前言.md",
                 "mode": "source",
                 "source": false
               }
@@ -85,7 +85,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Electron/起步.md",
+                "file": "go/Go 圣经/前言.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -102,7 +102,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Electron/起步.md",
+                "file": "go/Go 圣经/前言.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               }
@@ -125,7 +125,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Electron/起步.md"
+                "file": "go/Go 圣经/前言.md"
               }
             }
           }
@@ -148,9 +148,9 @@
   },
   "active": "da35b487da543cc6",
   "lastOpenFiles": [
+    "Electron/起步.md",
     "go/Go 圣经/前言.md",
     "go/Go 圣经",
-    "Electron/起步.md",
     "Electron"
   ]
 }
