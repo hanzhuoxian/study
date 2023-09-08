@@ -1,11 +1,12 @@
 {
   "name": "snailsql",
   "version": "1.0.0",
-  "description": "An Electron application with Vue and TypeScript",
+  "description": "A SQL tool",
   "main": "./out/main/index.js",
-  "author": "example.com",
+  "icon": "",
+  "author": "hanjian20180518@126.com",
   "license":"MIT",
-  "homepage": "https://www.electronjs.org",
+  "homepage": "https://www.daymenu.cn",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint . --ext .js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts,.vue --fix",

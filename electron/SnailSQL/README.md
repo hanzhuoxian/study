@@ -1,6 +1,6 @@
-# snailsql
+# SinalSQL
 
-An Electron application with Vue and TypeScript
+SinalSQL is a SQL TOOL
 
 ## Recommended IDE Setup
 

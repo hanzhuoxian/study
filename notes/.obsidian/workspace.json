@@ -15,7 +15,7 @@
               "state": {
                 "file": "go/Go 圣经/前言.md",
                 "mode": "source",
-                "source": false
+                "source": true
               }
             }
           }
@@ -69,7 +69,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 300,
+    "collapsed": true
   },
   "right": {
     "id": "248fbf8f79b64a53",
