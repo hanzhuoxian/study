@@ -13,7 +13,7 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "go/Go 圣经/前言.md",
+                "file": "go/Go 圣经/1. 入门.md",
                 "mode": "source",
                 "source": true
               }
@@ -69,8 +69,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "right": {
     "id": "248fbf8f79b64a53",
@@ -86,7 +85,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "go/Go 圣经/前言.md",
+                "file": "go/Go 圣经/1. 入门.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -103,7 +102,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "go/Go 圣经/前言.md",
+                "file": "go/Go 圣经/1. 入门.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               }
@@ -126,7 +125,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "go/Go 圣经/前言.md"
+                "file": "go/Go 圣经/1. 入门.md"
               }
             }
           }
@@ -149,9 +148,10 @@
   },
   "active": "da35b487da543cc6",
   "lastOpenFiles": [
+    "go/Go 圣经/前言.md",
+    "go/Go 圣经/1. 入门.md",
     "Markdown 入门.md",
     "Electron/起步.md",
-    "go/Go 圣经/前言.md",
     "go/Go 圣经",
     "Electron"
   ]
