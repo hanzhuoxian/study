@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/daymenu/gostudy/gopl/ch02/tempconv"
+	"github.com/hanzhuoxian/study/go/gopl/ch02/tempconv"
 )
 
 func main() {

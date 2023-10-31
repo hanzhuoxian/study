@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/daymenu/gostudy/gopl/ch03/pkg/surface"
+	"github.com/hanzhuoxian/study/go/gopl/ch03/pkg/surface"
 )
 
 func main() {

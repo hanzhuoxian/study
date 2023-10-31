@@ -18,8 +18,19 @@
                 "source": true
               }
             }
+          },
+          {
+            "id": "99623350fe05969a",
+            "type": "leaf",
+            "state": {
+              "type": "release-notes",
+              "state": {
+                "currentVersion": "1.4.13"
+              }
+            }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -128,6 +139,16 @@
                 "file": "go/Go 圣经/1. 入门.md"
               }
             }
+          },
+          {
+            "id": "545f35bfb106b7e3",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency"
+              }
+            }
           }
         ],
         "currentTab": 3
@@ -146,12 +167,15 @@
       "command-palette:Open command palette": false
     }
   },
-  "active": "da35b487da543cc6",
+  "active": "99623350fe05969a",
   "lastOpenFiles": [
-    "markdown/Markdown 入门.md",
-    "markdown",
     "go/Go 圣经/前言.md",
     "go/Go 圣经/1. 入门.md",
+    "go/Go 圣经/README.md",
+    "知识星球/时间.md",
+    "知识星球",
+    "Markdown/Markdown 入门.md",
+    "Markdown",
     "Markdown 入门.md",
     "Electron/起步.md",
     "go/Go 圣经",

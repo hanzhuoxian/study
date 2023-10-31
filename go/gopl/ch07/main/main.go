@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"fmt"
 	mrand "math/rand"
 )
@@ -21,7 +20,6 @@ func main() {
 	default:
 		fmt.Printf("%T %v", x, x)
 	}
-	rand.Int()
 	mrand.Float32()
 
 }

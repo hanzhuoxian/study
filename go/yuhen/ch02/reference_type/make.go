@@ -1,5 +1,11 @@
 package main
 
+import (
+	"fmt"
+
+	"github.com/daymenu/study/go/gopl/ch02/tempconv"
+)
+
 func mkslice() []int {
 	s := make([]int, 0, 10)
 	s = append(s, 100)
@@ -14,6 +20,7 @@ func mkmap() map[string]int {
 
 // go build -gcflags "-l" && go tool objdump -s "main\.mk" reference_type
 func main() {
+	fmt.Println(tempconv.FToC(tempconv.Fahrenheit(200)))
 	m := mkmap()
 	println(m["a"])
 	s := mkslice()
