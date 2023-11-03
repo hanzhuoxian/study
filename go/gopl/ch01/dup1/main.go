@@ -6,7 +6,8 @@ import (
 	"os"
 )
 
-//第一个版本的dup输出标准输入流中的出现多次的行，在行内容前是出现次数的计数。这个程序将引入if 表达式，map内置数据结构和bufio的package。
+// `dup` 的第一个版本打印标准输入中多次出现的行，以重复次数开头。
+// 该程序将引入 `if` 语句，`map` 数据类型以及 `bufio` 包。
 
 func main() {
 	count := make(map[string]int)
@@ -19,9 +20,8 @@ func main() {
 	}
 
 	for line, n := range count {
-		if n <= 1 {
-			continue
+		if n > 1 {
+			fmt.Printf("%d\t%s\n", n, line)
 		}
-		fmt.Printf("%d\t%s\n", n, line)
 	}
 }
