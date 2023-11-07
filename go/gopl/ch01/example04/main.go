@@ -7,17 +7,15 @@ import (
 	"os"
 )
 
-//下面的dup程序从 标准输入得到一些文件名，然后用os.Open函数来打开每一个文件获取内容。
-
 func main() {
 	// 定义缓存行次数的map
-	counts := make(map[string]int)
+	counts := make(map[string]map[string]int)
 	// 获取命令行
 	files := os.Args[1:]
 	if len(files) == 0 {
 		// 使用标准输入
 		fmt.Println("Please input your text: ")
-		countLines(os.Stdin, counts)
+		countLines("stdin", os.Stdin, counts)
 	} else {
 		// 循环读取文件
 		for _, filePath := range files {
@@ -27,23 +25,27 @@ func main() {
 				log.Printf("open %s is failed", filePath)
 				continue
 			}
-			countLines(file, counts)
+			countLines(filePath, file, counts)
 			file.Close()
 		}
 	}
 
-	for line, n := range counts {
-		if n > 1 {
-			fmt.Printf("%d\t%s\n", n, line)
+	for filename, fcounts := range counts {
+
+		for line, n := range fcounts {
+			if n > 1 {
+				fmt.Printf("%s\t%d\t%s\n", filename, n, line)
+			}
 		}
 	}
 
 }
 
-func countLines(f *os.File, counts map[string]int) {
+func countLines(filename string, f *os.File, counts map[string]map[string]int) {
 	input := bufio.NewScanner(f)
+	counts[filename] = make(map[string]int)
 	for input.Scan() {
-		counts[input.Text()]++
+		counts[filename][input.Text()]++
 	}
 	if input.Err() != nil {
 		log.Printf("open %v is failed", input.Err())
