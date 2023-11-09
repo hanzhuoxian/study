@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 )
@@ -15,7 +15,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "read %s error : %v", url, err)
 			os.Exit(1)
 		}
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "read %s error : %v", url, err)
 			os.Exit(1)
