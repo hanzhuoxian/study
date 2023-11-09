@@ -31,7 +31,7 @@ func Lissajous(out io.Writer, cycles int) {
 	const (
 		res    = 0.01 //角分辨率
 		size   = 100  //图像画布封面[-size..+size]
-		nframe = 64   //动画帧数
+		nframe = 128  //动画帧数
 		delay  = 8    //以10ms为单位的帧间延迟
 	)
 

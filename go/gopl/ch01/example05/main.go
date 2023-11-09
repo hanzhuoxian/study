@@ -10,7 +10,7 @@ import (
 	"os"
 )
 
-var palette = []color.Color{color.White, color.RGBA{0, 100, 0, 1}}
+var palette = []color.Color{color.White, color.RGBA{0, 127, 0, 128}}
 
 const (
 	whiteIndex = 0 //palette中的第一个元素
