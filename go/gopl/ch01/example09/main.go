@@ -22,13 +22,13 @@ func main() {
 			os.Exit(1)
 		}
 
+		fmt.Println("http status code : ", resp.Status)
 		_, err = io.Copy(os.Stdout, resp.Body)
+		defer resp.Body.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "read %s error : %v", url, err)
 			os.Exit(1)
 		}
-		defer resp.Body.Close()
 
-		fmt.Println("http status code : ", resp.Status)
 	}
 }

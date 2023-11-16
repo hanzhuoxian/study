@@ -1,3 +1,4 @@
+// Server1 is a minimal "echo" server.
 package main
 
 import (
@@ -7,10 +8,11 @@ import (
 )
 
 func main() {
-	http.HandleFunc("/", handler)
-	log.Fatal(http.ListenAndServe("127.0.0.1:8080", nil))
+	http.HandleFunc("/", handler) // each request calls handler
+	log.Fatal(http.ListenAndServe("localhost:8000", nil))
 }
 
+// handler echoes the Path component of the request URL r.
 func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "URL.PATH = %q\n", r.URL.Path)
+	fmt.Fprintf(w, "URL.Path = %q\n", r.URL.Path)
 }
