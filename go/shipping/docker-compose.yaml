@@ -1,0 +1,65 @@
+version: '3'
+services:
+ consul:
+  image: consul:latest
+  hostname: registry
+  container_name: registry
+  ports:
+  - "8300:8300"
+  - "8400:8400"
+  - "8500:8500"
+  - "8600:53/udp"
+  environment:
+   GOMAXPROCS: 2
+ micro:
+  command: api --handler=api
+  image: microhq/micro:latest
+  links:
+    - consul
+    - container-api
+  ports:
+    - "8080:8080"
+  environment:
+    MICRO_REGISTRY: consul
+    MICRO_API_NAMESPACE: daymenu.shippping.api
+    MICRO_REGISTRY_ADDRESS: registry:8500
+ micro-web:
+  command: web
+  image: microhq/micro:latest
+  links:
+    - consul
+  ports:
+    - "8082:8082"
+  environment:
+    MICRO_REGISTRY: consul
+    MICRO_REGISTRY_ADDRESS: registry:8500
+ mariadb-service:
+  image: mariadb:latest
+  hostname: mariadb.host
+  container_name: mariadb.host
+  environment:
+   MYSQL_ROOT_PASSWORD: 123456
+  volumes: ["./volume/mysql:/data/msyql"]
+ container-service:
+  build: ./container
+  ports: ["50052:50051"]
+  links: ["mariadb-service", "consul"]
+  depends_on: ["mariadb-service", "consul","user-service"]
+  environment:
+    CONSUL_HTTP_ADDR: registry
+ user-service:
+  build: ./user
+  ports: ["50053:50051"]
+  links: ["mariadb-service", "consul"]
+  depends_on: ["mariadb-service", "consul"]
+ vessel-service:
+  build: ./vessel
+  ports: ["50054:50051"]
+  links: ["mariadb-service", "consul"]
+  depends_on: ["mariadb-service", "consul","user-service"]
+  environment:
+    CONSUL_HTTP_ADDR: registry
+ container-api:
+  build: ./api
+  ports: ["50051:50051"]
+  links: ["consul"]

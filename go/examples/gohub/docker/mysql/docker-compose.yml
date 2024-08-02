@@ -1,0 +1,18 @@
+version: '3'
+services:
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_USER=gohub
+      - MYSQL_PASS=gohub
+  redis:
+    image: redis:7.0.8
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data:/var/lib/redis
