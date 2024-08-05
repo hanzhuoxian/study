@@ -1,3 +1,5 @@
+use std::io;
+
 fn main() {
     let int8: i8 = 0o17;
     let uint8: u8 = b'A'; // 单字节字符
@@ -52,7 +54,32 @@ fn main() {
     println!("c {}, z {}", c, z);
 
     // 复合类型-元组（tuple）
+    // 将其他类型的值组合到一个复合类型的主要方式
     let tup: (i32, f64, u8) = (500, 6.4, 1);
-    println!("tup.0 {}, tup.1 {}, tup.2 {}", tup.0, tup.1, tup.2)
+    println!("tup.0 {}, tup.1 {}, tup.2 {}", tup.0, tup.1, tup.2);
 
+    // 元组解构
+    let (x, y, z) = tup;
+    println!("x {} y {} z {}", x, y, z);
+
+    // 数组
+    let a: [i32; 5] = [1, 2, 3, 4, 5];
+    println!("a[0] {}", a[0]);
+
+    // 初始值为 3 的 5 个元素
+    let a5 = [3; 5];
+    println!("a[0] {}", a5[0]);
+    println!("a[4] {}", a5[4]);
+
+    let a = [1, 2, 3, 4, 5];
+    println!("{}", a.len());
+    // 数组索引访问
+    println!("Please input array index");
+
+    let mut index = String::new();
+
+    io::stdin().read_line(&mut index).expect("Pl");
+
+    let index: usize = index.trim().parse().expect("int");
+    println!("a[{}]:{}", index, a[index]);
 }
