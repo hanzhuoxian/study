@@ -82,4 +82,5 @@ fn main() {
 
     let index: usize = index.trim().parse().expect("int");
     println!("a[{}]:{}", index, a[index]);
+    println!("tup.0 {}, tup.1 {}, tup.2 {}", tup.0, tup.1, tup.2)
 }
