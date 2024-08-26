@@ -63,3 +63,19 @@ Fn: 适用于既不将捕获的值移出闭包体，也不修改捕获值的闭�
     only_borrows();
     println!("From outside: {:?}", list);
 ```
+
+## 迭代器
+
+迭代器模式允许你依次对一个序列中的项执行某些操作。迭代器(iterator)负责遍历序列中 的每一项并确定序列何时结束的逻辑。
+
+```rust
+
+pub trait Iterator {
+    type Item;
+
+    fn next(&mut self) -> Option<Self::Item>;
+
+    // 此处省略了方法的默认实现
+}
+
+```

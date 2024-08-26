@@ -5,6 +5,11 @@ enum ShirtColor {
     Red,
     Blue,
 }
+#[derive(Debug)]
+struct Rectangle {
+    width: u32,
+    height: u32,
+}
 
 struct Inventory {
     shirts: Vec<ShirtColor>,
@@ -78,4 +83,11 @@ fn main() {
     let fn_once = || {list};
     println!("From mut_fn: {:?}", fn_once());
 
+    let mut list = vec![
+        Rectangle{width:10, height:10},
+        Rectangle{width:3, height:3},
+        Rectangle{width:5, height:5},
+        ];
+    list.sort_by_key(|r|r.width);
+    println!("{:?}", list)
 }
