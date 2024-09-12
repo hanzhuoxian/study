@@ -1,3 +1,5 @@
+use flora_sum::sum;
+
 fn main() {
-    println!("Hello, world!");
+    println!("{}",sum(3,4));
 }
