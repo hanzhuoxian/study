@@ -22,7 +22,7 @@ async fn main() {
 // which calls one of these handlers
 async fn root() -> Json<Value> {
     Json(json!({
-        "message": "Hello, World!"
+        "message": "Hello, World."
     }))
 }
 async fn get_foo() {}
