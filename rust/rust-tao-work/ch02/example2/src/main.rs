@@ -1,3 +1,6 @@
+//  extern crate std;  // 声明语句 Rust 自动引入
+// use std::prelude::v1::*; // 声明语句 Rust 自动引入
+
 fn main() {
     pub fn answer() -> () {
         let a = 40;
@@ -10,10 +13,10 @@ fn main() {
     }
     answer();
 
-    fn temp() -> i32 {
-        1
-    }
+    // fn temp() -> i32 {
+    //     1
+    // }
 
-    let x = temp();
+    // let x = temp();
     // temp() = &x
 }
