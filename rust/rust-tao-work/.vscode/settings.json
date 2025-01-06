@@ -1,5 +1,7 @@
 {
     "cSpell.words": [
-        "CTFE"
+        "CTFE",
+        "Deque",
+        "println"
     ]
 }

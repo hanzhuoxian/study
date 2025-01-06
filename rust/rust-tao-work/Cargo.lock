@@ -3,6 +3,22 @@
 version = 3
 
 [[package]]
+name = "example01"
+version = "0.1.0"
+
+[[package]]
+name = "example02"
+version = "0.1.0"
+
+[[package]]
+name = "example03"
+version = "0.1.0"
+
+[[package]]
+name = "example04"
+version = "0.1.0"
+
+[[package]]
 name = "example1"
 version = "0.1.0"
 
@@ -51,7 +67,79 @@ name = "example20"
 version = "0.1.0"
 
 [[package]]
+name = "example21"
+version = "0.1.0"
+
+[[package]]
+name = "example22"
+version = "0.1.0"
+
+[[package]]
+name = "example23"
+version = "0.1.0"
+
+[[package]]
+name = "example24"
+version = "0.1.0"
+
+[[package]]
+name = "example25"
+version = "0.1.0"
+
+[[package]]
+name = "example26"
+version = "0.1.0"
+
+[[package]]
+name = "example27"
+version = "0.1.0"
+
+[[package]]
+name = "example28"
+version = "0.1.0"
+
+[[package]]
+name = "example29"
+version = "0.1.0"
+
+[[package]]
 name = "example3"
+version = "0.1.0"
+
+[[package]]
+name = "example30"
+version = "0.1.0"
+
+[[package]]
+name = "example31"
+version = "0.1.0"
+
+[[package]]
+name = "example32"
+version = "0.1.0"
+
+[[package]]
+name = "example33"
+version = "0.1.0"
+
+[[package]]
+name = "example34"
+version = "0.1.0"
+
+[[package]]
+name = "example36"
+version = "0.1.0"
+
+[[package]]
+name = "example37"
+version = "0.1.0"
+
+[[package]]
+name = "example38"
+version = "0.1.0"
+
+[[package]]
+name = "example39"
 version = "0.1.0"
 
 [[package]]
@@ -59,7 +147,83 @@ name = "example4"
 version = "0.1.0"
 
 [[package]]
+name = "example40"
+version = "0.1.0"
+
+[[package]]
+name = "example41"
+version = "0.1.0"
+
+[[package]]
+name = "example42"
+version = "0.1.0"
+
+[[package]]
+name = "example43"
+version = "0.1.0"
+
+[[package]]
+name = "example44"
+version = "0.1.0"
+
+[[package]]
+name = "example45"
+version = "0.1.0"
+
+[[package]]
+name = "example46"
+version = "0.1.0"
+
+[[package]]
+name = "example47"
+version = "0.1.0"
+
+[[package]]
+name = "example48"
+version = "0.1.0"
+
+[[package]]
+name = "example49"
+version = "0.1.0"
+
+[[package]]
 name = "example5"
+version = "0.1.0"
+
+[[package]]
+name = "example50"
+version = "0.1.0"
+
+[[package]]
+name = "example52"
+version = "0.1.0"
+
+[[package]]
+name = "example53"
+version = "0.1.0"
+
+[[package]]
+name = "example54"
+version = "0.1.0"
+
+[[package]]
+name = "example55"
+version = "0.1.0"
+
+[[package]]
+name = "example56"
+version = "0.1.0"
+
+[[package]]
+name = "example57"
+version = "0.1.0"
+
+[[package]]
+name = "example58"
+version = "0.1.0"
+
+[[package]]
+name = "example59"
 version = "0.1.0"
 
 [[package]]
