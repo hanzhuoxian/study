@@ -1,6 +1,7 @@
 #[derive(Debug)]
 struct Foo {}
 
+#[allow(dead_code)]
 trait Bar {
     fn baz(&self);
 }

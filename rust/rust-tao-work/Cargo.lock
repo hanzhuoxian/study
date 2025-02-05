@@ -3,6 +3,19 @@
 version = 3
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e60d3430d3a69478ad0993f19238d2df97c507009a52b3c10addcd7f6bcb916"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "csv-read"
+version = "0.1.0"
+
+[[package]]
 name = "example01"
 version = "0.1.0"
 
@@ -115,7 +128,207 @@ name = "example0336"
 version = "0.1.0"
 
 [[package]]
+name = "example0337"
+version = "0.1.0"
+
+[[package]]
+name = "example0338"
+version = "0.1.0"
+
+[[package]]
+name = "example0339"
+version = "0.1.0"
+
+[[package]]
+name = "example0340"
+version = "0.1.0"
+
+[[package]]
+name = "example0341"
+version = "0.1.0"
+
+[[package]]
+name = "example0342"
+version = "0.1.0"
+
+[[package]]
+name = "example0343"
+version = "0.1.0"
+
+[[package]]
+name = "example0344"
+version = "0.1.0"
+
+[[package]]
+name = "example0345"
+version = "0.1.0"
+
+[[package]]
+name = "example0348"
+version = "0.1.0"
+
+[[package]]
+name = "example0350"
+version = "0.1.0"
+
+[[package]]
+name = "example0351"
+version = "0.1.0"
+
+[[package]]
+name = "example0352"
+version = "0.1.0"
+
+[[package]]
+name = "example0353"
+version = "0.1.0"
+
+[[package]]
+name = "example0354"
+version = "0.1.0"
+
+[[package]]
+name = "example0357"
+version = "0.1.0"
+
+[[package]]
+name = "example0358"
+version = "0.1.0"
+
+[[package]]
+name = "example0359"
+version = "0.1.0"
+
+[[package]]
+name = "example0360"
+version = "0.1.0"
+
+[[package]]
+name = "example0361"
+version = "0.1.0"
+
+[[package]]
+name = "example0362"
+version = "0.1.0"
+
+[[package]]
+name = "example0363"
+version = "0.1.0"
+
+[[package]]
+name = "example0364"
+version = "0.1.0"
+
+[[package]]
+name = "example0365"
+version = "0.1.0"
+
+[[package]]
+name = "example0366"
+version = "0.1.0"
+
+[[package]]
+name = "example0367"
+version = "0.1.0"
+
+[[package]]
+name = "example0370"
+version = "0.1.0"
+
+[[package]]
+name = "example0371"
+version = "0.1.0"
+
+[[package]]
+name = "example0372"
+version = "0.1.0"
+
+[[package]]
+name = "example0374"
+version = "0.1.0"
+
+[[package]]
+name = "example0376"
+version = "0.1.0"
+
+[[package]]
 name = "example04"
+version = "0.1.0"
+
+[[package]]
+name = "example0401"
+version = "0.1.0"
+
+[[package]]
+name = "example0402"
+version = "0.1.0"
+
+[[package]]
+name = "example0403"
+version = "0.1.0"
+
+[[package]]
+name = "example0404"
+version = "0.1.0"
+
+[[package]]
+name = "example0405"
+version = "0.1.0"
+
+[[package]]
+name = "example0406"
+version = "0.1.0"
+
+[[package]]
+name = "example0407"
+version = "0.1.0"
+
+[[package]]
+name = "example0408"
+version = "0.1.0"
+
+[[package]]
+name = "example0409"
+version = "0.1.0"
+
+[[package]]
+name = "example0411"
+version = "0.1.0"
+
+[[package]]
+name = "example0413"
+version = "0.1.0"
+
+[[package]]
+name = "example0414"
+version = "0.1.0"
+
+[[package]]
+name = "example0415"
+version = "0.1.0"
+
+[[package]]
+name = "example0417"
+version = "0.1.0"
+
+[[package]]
+name = "example0418"
+version = "0.1.0"
+
+[[package]]
+name = "example0419"
+version = "0.1.0"
+
+[[package]]
+name = "example0420"
+version = "0.1.0"
+
+[[package]]
+name = "example0421"
+version = "0.1.0"
+
+[[package]]
+name = "example0422"
 version = "0.1.0"
 
 [[package]]
@@ -145,6 +358,28 @@ version = "0.1.0"
 [[package]]
 name = "example10"
 version = "0.1.0"
+
+[[package]]
+name = "example1008"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
+name = "example1010"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "regex",
+]
+
+[[package]]
+name = "example1012"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+]
 
 [[package]]
 name = "example11"
@@ -357,3 +592,58 @@ version = "0.1.0"
 [[package]]
 name = "example9"
 version = "0.1.0"
+
+[[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
+name = "memchr"
+version = "2.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
+
+[[package]]
+name = "regex"
+version = "1.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b544ef1b4eac5dc2db33ea63606ae9ffcfac26c1416a2806ae0bf5f56b201191"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "809e8dc61f6de73b46c85f4c96486310fe304c434cfa43669d7b40f711150908"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
+
+[[package]]
+name = "static_hashmap"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
+name = "use_regex"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
