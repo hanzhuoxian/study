@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "ch02/*",
     "ch03/*",
-    "ch04/*",
+    "ch04/*", 
+    "ch05/*",
     "ch10/*"
-    ]
+    , "example0556"]
