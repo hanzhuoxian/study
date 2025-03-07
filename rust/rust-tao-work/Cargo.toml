@@ -5,6 +5,6 @@ members = [
     "ch02/*",
     "ch03/*",
     "ch04/*", 
-    "ch05/*",
+    "ch05/*", "ch06/example0601", "ch06/example0602", "ch06/example0603", "ch06/example0604", "ch06/example0605", "ch06/example0606", "ch06/example0607", "ch06/example0608", "ch06/example0609", "ch06/example0610", "ch06/example0611", "ch06/example0612", "ch06/example0613", "ch06/example0614", "ch06/example0615", "ch06/example0616", "ch06/example0618", "ch06/example0619", "ch06/example0620", "ch06/example0621", "ch06/example0622", "ch06/example0626", "ch06/example0628", "ch06/example0630", "ch06/example0631", "ch06/example0633", "ch06/example0635", "ch06/example0636", "ch06/example0637", "ch06/example0641", "ch06/example0642", "ch06/example0643", "ch06/example0647", "ch06/example0648", "ch06/example0652", "ch06/example0653", "ch06/example0657", "ch06/example0660", "ch06/example0662", "ch06/example0663", "ch06/example0667", "ch06/example0671", "ch06/example0674", "ch06/example0675", "ch06/example0680", "ch06/example0682",
     "ch10/*"
     , "example0556"]
