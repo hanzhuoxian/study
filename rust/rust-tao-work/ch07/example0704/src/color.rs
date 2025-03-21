@@ -78,9 +78,9 @@ impl ColoredString {
 impl Display for ColoredString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let input = &self.input.clone();
-        let _ = f.write_str(&self.compute_style());
-        let _ = f.write_str(input);
-        let _ = f.write_str("\x1B[0m");
+        f.write_str(&self.compute_style())?;
+        f.write_str(input)?;
+        f.write_str("\x1B[0m")?;
         Ok(())
     }
 }
