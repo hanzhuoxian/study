@@ -1,0 +1,23 @@
+fn get_shortest(names: Vec<&str>) -> Option<&str> {
+    if names.is_empty() {
+        return None;
+    }
+    let mut shortest = names[0];
+    for &name in names.iter() {
+        if name.len() < shortest.len() {
+            shortest = name;
+        }
+    }
+    Some(shortest)
+}
+
+fn get_shortest_len(names: Vec<&str>) -> Option<usize> {
+    match get_shortest(names) {
+        Some(s) => Some(s.len()),
+        None => None,
+    }
+}
+fn main() {
+    assert_eq!(get_shortest_len(vec!["Uku", "Felipe"]), Some(3));
+    assert_eq!(get_shortest_len(Vec::new()), None);
+}
