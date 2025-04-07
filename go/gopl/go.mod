@@ -1,3 +1,3 @@
 module github.com/hanzhuoxian/study/go/gopl
 
-go 1.22.6
+go 1.24.1
