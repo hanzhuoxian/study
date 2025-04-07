@@ -4,11 +4,17 @@ use std::io::Read;
 
 type ParseResult<T> = Result<T, Box<dyn Error>>;
 
-fn main() {
+fn main() -> Result<(), i32> {
     let file_name = std::env::args().nth(1);
     match run(file_name) {
-        Ok(sum) => println!("{}", sum),
-        Err(e) => println!("{}", e),
+        Ok(sum) => {
+            println!("{}", sum);
+            return Ok(());
+        }
+        Err(e) => {
+            println!("{}", e);
+            return Err(1);
+        }
     }
 }
 
