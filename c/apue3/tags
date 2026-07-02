@@ -1,0 +1,110 @@
+Maccess	ch4/access.c	/^int main(int argc, char const *argv[])$/
+Macct	ch8/acct.c	/^int main(int argc, char const *argv[])$/
+Matexit	ch7/atexit.c	/^int main(int argc, char const *argv[])$/
+Mbinio	ch5/binio.c	/^int main(int argc, char const *argv[])$/
+Mbuffer	ch5/buffer.c	/^int main(int argc, char const *argv[])$/
+Mchmod	ch4/chmod.c	/^int main(int argc, char const *argv[])$/
+Mchown	ch4/chown.c	/^int main(int argc, char const *argv[])$/
+Mclockgettime	ch6/clockgettime.c	/^int main(int argc, char const *argv[])$/
+Mclose	ch3/close.c	/^int main(int argc, char *argv[])$/
+Mcopy	ch1/copy.c	/^int main(int argc, char *argv[])$/
+Mcreate	ch3/create.c	/^int main(int argc, char *argv[])$/
+Mdup	ch3/dup.c	/^int main(int argc, char const *argv[])$/
+Mdup2	ch3/dup2.c	/^int main(int argc, char const *argv[])$/
+Mecho	ch7/echo.c	/^int main(int argc, char const *argv[])$/
+Mechoall	ch8/echoall.c	/^int main(int argc, char const *argv[])$/
+Mechoarg	ch8/echoarg.c	/^int main(int argc, char const *argv[])$/
+Menv	ch7/env.c	/^int main(int argc, char const *argv[])$/
+Menviron	ch7/environ.c	/^int main(int argc, char const *argv[])$/
+Mexec	ch8/exec.c	/^int main(int argc, char const *argv[])$/
+Mexit	ch7/exit.c	/^int main(int argc, char const *argv[])$/
+Mfcntl	ch3/fcntl.c	/^int main(int argc, char const *argv[])$/
+Mfd	ch3/fd.c	/^int main(int argc, char *argv[])$/
+Mferror	ch5/ferror.c	/^int main(int argc, char const *argv[])$/
+Mfgetc	ch5/fgetc.c	/^int main(int argc, char const *argv[])$/
+Mfgetpos	ch5/fgetpos.c	/^int main(int argc, char const *argv[])$/
+Mfgets	ch5/fgets.c	/^int main(int argc, char const *argv[])$/
+Mfopen	ch5/fopen.c	/^int main(int argc, char const *argv[])$/
+Mfork	ch8/fork.c	/^int main(int argc, char const *argv[])$/
+Mfseek	ch5/fseek.c	/^int main(int argc, char const *argv[])$/
+Mfutimens	ch4/futimens.c	/^int main(int argc, char const *argv[])$/
+Mfwide	ch5/fwide.c	/^int main(int argc, char const *argv[])$/
+Mgetc	ch5/getc.c	/^int main(int argc, char const *argv[])$/
+Mgetchar	ch5/getchar.c	/^int main(int argc, char const *argv[])$/
+Mgetcwd	ch4/getcwd.c	/^int main(int argc, char const *argv[])$/
+Mgetpgid	ch9/getpgid.c	/^int main(int argc, const char *argv[])$/
+Mgetpwnam	ch6/getpwnam.c	/^int main(int argc, char const *argv[])$/
+Mgexec	ch1/gexec.c	/^int main(int argc, char *argv[])$/
+Mgmtime	ch6/gmtime.c	/^int main(int argc, char const *argv[])$/
+Mgroup	ch6/group.c	/^int main(int argc, char const *argv[])$/
+Mhello	ch1/hello.c	/^int main(int argc, char *argv[])$/
+Minterp	ch8/interp.c	/^int main(int argc, char const *argv[])$/
+Mio	ch5/io.c	/^int main(int argc, char const *argv[])$/
+Mioline	ch5/ioline.c	/^int main(int argc, char const *argv[])$/
+Mlen	ch4/len.c	/^int main(int argc, char const *argv[])$/
+Mline	ch7/line.c	/^int main(int argc, char const *argv[])$/
+Mlocaltime	ch6/localtime.c	/^int main(int argc, char const *argv[])$/
+Mlseek	ch3/lseek.c	/^int main(int argc, char const *argv[])$/
+Mmalloc	ch7/malloc.c	/^int main(int argc, char const *argv[])$/
+Mmerror	ch1/merror.c	/^int main(int argc, char *argv[])$/
+Mmkdir	ch4/mkdir.c	/^int main(int argc, char const *argv[])$/
+Mmktime	ch6/mktime.c	/^int main(int argc, char const *argv[])$/
+Mmsignal	ch1/msignal.c	/^int main(int argc, char *argv[])$/
+Mnice	ch8/nice.c	/^int main(int argc, char const *argv[])$/
+Mopen	ch3/open.c	/^int main(int argc, char *argv[])$/
+Mopen_data	ch7/open_data.c	/^int main(int argc, char const *argv[])$/
+Mpid	ch1/pid.c	/^int main(int argc, char *argv[])$/
+Mpos	ch5/pos.c	/^int main(int argc, char const *argv[])$/
+Mprintf	ch5/printf.c	/^int main(int argc, char const *argv[])$/
+Mputc	ch5/putc.c	/^int main(int argc, char const *argv[])$/
+Mpwd	ch6/pwd.c	/^int main(int argc, char const *argv[])$/
+Mrdev	ch4/rdev.c	/^int main(int argc, char const *argv[])$/
+Mread	ch3/read.c	/^int main(int argc, char const *argv[])$/
+Mreadir	ch4/readir.c	/^int main(int argc, char const *argv[])$/
+Mrename	ch4/rename.c	/^int main(int argc, char const *argv[])$/
+Mrlimit	ch7/rlimit.c	/^int main(int argc, char const *argv[])$/
+Mshadow	ch6/shadow.c	/^int main(int argc, char const *argv[])$/
+Mson	ch8/son.c	/^int main(int argc, char const *argv[])$/
+Mstat	ch4/stat.c	/^int main(int argc, char const *argv[])$/
+Mstrftime	ch6/strftime.c	/^int main(int argc, char const *argv[])$/
+Mstrptime	ch6/strptime.c	/^int main(int argc, char const *argv[])$/
+Msymlink	ch4/symlink.c	/^int main(int argc, char const *argv[])$/
+Msystem	ch8/system.c	/^int main(int argc, char const *argv[])$/
+Mtellwait	ch8/tellwait.c	/^int main(int argc, char const *argv[])$/
+Mtime	ch6/time.c	/^int main(int argc, char const *argv[])$/
+Mtruncate	ch4/truncate.c	/^int main(int argc, char const *argv[])$/
+Mtruncatentime	ch4/truncatentime.c	/^int main(int argc, char const *argv[])$/
+Mtype	ch1/type.c	/^int main(int argc, char const *argv[])$/
+Mumask	ch4/umask.c	/^int main(int argc, char const *argv[])$/
+Munlink	ch4/unlink.c	/^int main(int argc, char const *argv[])$/
+Mutmp	ch6/utmp.c	/^int main(int argc, char const *argv[])$/
+Mutsname	ch6/utsname.c	/^int main(int argc, char const *argv[])$/
+Mvaljump	ch7/valjump.c	/^int main(int argc, char const *argv[])$/
+Mwait	ch8/wait.c	/^int main(int argc, char const *argv[])$/
+Mwrite	ch3/write.c	/^int main(int argc, char const *argv[])$/
+Myfunc	ch4/readir.c	/^typedef int Myfunc(const char *, const struct stat/
+buffer_size	ch5/buffer.c	/^int buffer_size(FILE *fp)$/
+charatatime	ch8/tellwait.c	/^static void charatatime(char *str)$/
+checktime	ch8/nice.c	/^void checktime(char *str)$/
+cmd_add	ch7/line.c	/^void cmd_add(void)$/
+do_line	ch7/line.c	/^void do_line(char *ptr)$/
+doit	ch7/rlimit.c	/^#define doit(name) pr_limits(#name, name)$/
+dopath	ch4/readir.c	/^static int dopath(Myfunc *func)$/
+f1	ch7/valjump.c	/^static void f1(int i, int j, int k, int l)$/
+f2	ch7/valjump.c	/^static void f2(void)$/
+get_token	ch7/line.c	/^int get_token(void)$/
+is_linebuffered	ch5/buffer.c	/^int is_linebuffered(FILE *fp)$/
+is_unbuffered	ch5/buffer.c	/^int is_unbuffered(FILE *fp)$/
+my_exit1	ch7/atexit.c	/^static void my_exit1(void)$/
+my_exit2	ch7/atexit.c	/^static void my_exit2(void)$/
+mydup2	ch3/dup2.c	/^int mydup2(int fd, int fd2)$/
+myftw	ch4/readir.c	/^static int myftw(const char *pathname, Myfunc *fun/
+mygetpwnam	ch6/getpwnam.c	/^struct passwd *mygetpwnam(const char *name)$/
+newfmt	ch5/printf.c	/^char *newfmt(const char *fmt, ...)$/
+open	ch2/open.c	/^int     open(const char *, int, ...) __DARWIN_ALIA/
+open_data	ch7/open_data.c	/^FILE *open_data(void)$/
+pr_exit	ch8/pr_exit.c	/^void pr_exit(int status)$/
+pr_limits	ch7/rlimit.c	/^static void pr_limits(char *name, int resource)$/
+pr_stdio	ch5/buffer.c	/^void pr_stdio(const char *name, FILE *fp)$/
+sig_int	ch1/msignal.c	/^void sig_int(int signo)$/
+system	ch8/system.c	/^int system(const char *cmdstring)$/
