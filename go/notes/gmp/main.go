@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"runtime/trace"
 )
@@ -14,4 +15,7 @@ func main() {
 	trace.Start(f)
 	defer trace.Stop()
 
+	go func() {
+		fmt.Println("go runtime")
+	}()
 }
