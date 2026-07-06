@@ -162,3 +162,146 @@ type p struct {
 - **M 必须持有 P 才能执行 G**：P 是"许可证 + 资源包"，M 是"工人"，G 是"任务"。
 - 全局最多 `GOMAXPROCS` 个 M 在并行跑用户代码（因为只有这么多 P）；但 M 总数可更多（阻塞 syscall 时 P 会 handoff 给别的 M）。
 - 调度取 G 顺序：`runnext` → 本地 `runq` → 全局队列 → netpoller → 偷其他 P 的一半。
+
+## 各要素的诞生顺序（从进程到 goroutine）
+
+把 m0/g0、P、goroutine、工作线程按「谁先出现、谁触发谁」串成一条时间线。
+
+### 主干：进程 → 主线程 → 绑定 P → 首个 goroutine
+
+```
+① 进程诞生
+   OS exec() 加载可执行文件 → 内核创建【主线程】(主 OS 线程)
+   这个主线程在 Go 里就是 m0
+
+② 主线程跑引导 (rt0_go 汇编)
+   划出 g0 栈  →  绑定 m0.g0 = g0 / g0.m = m0
+   （m0 和 g0 都是全局变量，进程唯一）
+
+③ schedinit：把 runtime 拉起来
+   mallocinit / gcinit / ...
+   读 GOMAXPROCS
+   procresize(n)  →  一次性创建 n 个【P】(P0..Pn-1)
+                     m0 绑定 P0，其余 P 进空闲列表(_Pidle)
+
+④ newproc(runtime.main)
+   创建【主 goroutine】(goid=1)，入 P0 的运行队列
+   —— 此刻只入队，还没跑
+
+⑤ mstart → schedule()
+   m0 在自己的 g0 上跑调度循环，捞到主 goroutine → 开始执行 runtime.main
+```
+
+到 ⑤ 为止，`m0—P0—主goroutine` 三者就位。
+
+### 运行期：按需新建线程 / 新建 goroutine
+
+```
+⑥ runtime.main 内部
+   newm(sysmon)  →  新建一条【监控线程】(不绑 P，独立跑)
+   gcenable      →  启动后台 GC
+   跑各种 init …
+        │
+        ▼
+⑦ 调用用户 main.main
+        │
+        ▼
+⑧ 用户写的 go func(){...}
+   编译成 → newproc(fn)
+        ├─ 新建/复用一个【g】(goroutine)，状态 _Grunnable
+        ├─ runqput：放进当前 P 的 runnext / 本地队列
+        └─ wakep()：看有没有空闲 P + 需要干活
+              │
+              ├─ 有空闲 P 且没有空闲 M → newm() 新建【工作线程】
+              │        新线程绑定那个空闲 P，跑起自己的 schedule()
+              │        去队列里捞这个新 g 来执行 ← 实现并行
+              │
+              └─ 已有空闲 M 睡着 → 直接唤醒它(而不是新建)
+```
+
+### 谁触发谁
+
+| 事件 | 由谁触发 | 产物 |
+|------|----------|------|
+| 主线程(m0) | OS 创建进程 | 唯一，程序入口执行流 |
+| P 数组 | `schedinit → procresize` | GOMAXPROCS 个，一次建好 |
+| 主 goroutine | `rt0_go → newproc` | 入口 `runtime.main` |
+| sysmon 线程 | `runtime.main → newm` | 后台监控，不占 P |
+| **新工作线程(M)** | **`newproc → wakep → newm`** | **有空闲 P 且没空闲 M 时才建** |
+| 用户 goroutine | 用户 `go` 语句 → `newproc` | 入 P 本地队列等调度 |
+
+**三个容易混的点**
+
+1. **P 是「批量、提前」建的**：启动时 `procresize` 一把建满 `GOMAXPROCS` 个；而 **M（线程）是「懒惰、按需」建的**，只有有活干、有空闲 P、又没有空闲 M 时才 `newm`，空闲后会复用不销毁。
+2. **新建 goroutine ≠ 新建线程**：`go func()` 绝大多数情况只是往当前 P 队列塞个 g，由现有 M 顺手执行，**不会**新建线程。只有「有富余 P 没人用 + 确实需要并行」时，`wakep` 才可能拉起新 M。所以百万 goroutine 也就跑在 GOMAXPROCS 量级的线程上。
+3. **绑定方向是 M 去绑 P**（工人领许可证），不是 P 绑 M。M 拿到 P 才能跑用户 g；进系统调用时 M 会把 P handoff 给别的 M，自己带着 g 陷入内核。
+
+> 一句话：**进程给你一个主线程 → 主线程建好一批 P 并绑住一个 → 用「首个 goroutine」启动 runtime.main → 用户每个 `go` 只是造一个 g 入队，线程只在需要并行且有空闲 P 时才被 `wakep` 按需拉起。** 完整的进程启动汇编链路见 [exec.md](exec.md)。
+
+## 调度是如何运转的
+
+理解 GMP 的最后一块拼图：**调度不是某个中心线程的专属工作，而是去中心化地跑在每个 M 各自的 `g0` 上。** 这里澄清两个高频误解。
+
+### 误解一：`g0` 是全局唯一的
+
+不是。`g0` 是**每个 M 都有一份**的「系统栈/调度栈」。无论是引导阶段的 `m0`，还是运行期 `newm` 创建的工作线程、sysmon 线程，创建时都各自带一个 `g0`：
+
+```
+m0   ── g0(m0)      ← 主线程的调度栈（负责引导）
+m1   ── g0(m1)      ← 工作线程1的调度栈
+m2   ── g0(m2)
+sysmon线程 ── g0    （不绑 P，基本一直在 g0 上跑监控）
+...
+```
+
+- **普通 g（goroutine）**：跑用户代码，栈可增长（初始 2KB）。
+- **g0**：固定大小，专门承载 runtime 自己的代码——`schedule()`、GC、栈扩容（`morestack`）、`newproc`、系统调用切换等。
+
+### 误解二：`m0`/`g0` 负责协调整个 GMP
+
+`m0` 的特殊只体现在**启动阶段**：`rt0_go → schedinit → 创建主 goroutine → 第一次 schedule()` 都发生在 `m0` 的 `g0` 上，因为那时还没有别的线程。**引导一结束，m0 就退化成一个普通 M**，和 m1/m2 一样去抢 P、跑 G、在自己 g0 上做调度，不比别人多管什么。（少数平台相关操作要求主线程执行时，m0 才再次体现特殊性。）
+
+真正「协调」调度的是 **P（队列与资源的枢纽）+ 每个 M 在自己 g0 上跑的 `schedule()`**——N 个 M 通过共享的 P、全局队列、work-stealing 互相协作，没有总指挥。
+
+### 一次调度切换的流程
+
+```
+某个 M 上：
+  用户 goroutine (gA) 运行中
+        │  时间片用完 / 阻塞 / 主动让出(Gosched) / 系统调用返回
+        ▼
+  切换到 本 M 的 g0 栈            ← mcall / systemstack
+        │
+        ▼
+  在 g0 上执行 schedule()：
+     - 按顺序找一个可运行的 G：
+       runnext → 本地 runq → 全局队列 → netpoller → 偷其他 P 的一半
+     - 找到 gB 后 gogo(gB) 切过去
+        │
+        ▼
+  切回 gB 的用户栈继续执行
+```
+
+关键点：**用户栈 ↔ g0 栈的来回切换**就是调度的物理动作。`gA` 让出时把执行现场存进它自己的 `g.sched (gobuf)`，切到 g0 选出 `gB`，再从 `gB.sched` 恢复现场跳过去——全程在用户态完成，不进内核，这就是 goroutine 切换比线程切换快的根源。
+
+### goroutine 从生到死
+
+```
+go func(){...}
+    │  编译成 runtime.newproc
+    ▼
+newproc → newproc1：gfget 复用 或 malg(2KB) 新建一个 g
+    │  设置 g.sched.pc = goexit，再用 gostartcallfn 塞入真正的 fn
+    ▼
+runqput(P, g)：放进当前 P 的 runnext / 本地队列，状态 _Grunnable
+    │  （必要时 wakep 唤醒或新建 M 来并行执行）
+    ▼
+被某个 M 的 schedule() 选中 → gogo → 状态 _Grunning，执行 fn
+    │  fn 返回后自动回到 goexit
+    ▼
+goexit0：清理 g，状态置 _Gdead，放回 P 的 gFree 缓存池等待复用
+```
+
+> 因为新 g 的返回地址被设成了 `goexit`，goroutine 执行完函数会「自动」回到 runtime 手里做清理和回收，用户无需关心生命周期。
+
+> 完整的进程启动 → 首个 goroutine → 首次调度的链路，见 [exec.md](exec.md)。
