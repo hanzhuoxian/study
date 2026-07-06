@@ -221,14 +221,14 @@ type p struct {
 
 ### 谁触发谁
 
-| 事件 | 由谁触发 | 产物 |
-|------|----------|------|
-| 主线程(m0) | OS 创建进程 | 唯一，程序入口执行流 |
-| P 数组 | `schedinit → procresize` | GOMAXPROCS 个，一次建好 |
-| 主 goroutine | `rt0_go → newproc` | 入口 `runtime.main` |
-| sysmon 线程 | `runtime.main → newm` | 后台监控，不占 P |
+| 事件              | 由谁触发                     | 产物                           |
+| ----------------- | ---------------------------- | ------------------------------ |
+| 主线程(m0)        | OS 创建进程                  | 唯一，程序入口执行流           |
+| P 数组            | `schedinit → procresize`     | GOMAXPROCS 个，一次建好        |
+| 主 goroutine      | `rt0_go → newproc`           | 入口 `runtime.main`            |
+| sysmon 线程       | `runtime.main → newm`        | 后台监控，不占 P               |
 | **新工作线程(M)** | **`newproc → wakep → newm`** | **有空闲 P 且没空闲 M 时才建** |
-| 用户 goroutine | 用户 `go` 语句 → `newproc` | 入 P 本地队列等调度 |
+| 用户 goroutine    | 用户 `go` 语句 → `newproc`   | 入 P 本地队列等调度            |
 
 **三个容易混的点**
 
