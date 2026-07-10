@@ -43,7 +43,11 @@ func main() {
 func countLines(f *os.File, counts map[string]int) {
 	input := bufio.NewScanner(f)
 	for input.Scan() {
-		counts[input.Text()]++
+		t := input.Text()
+		if t == "quit" {
+			break
+		}
+		counts[t]++
 	}
 	if input.Err() != nil {
 		log.Printf("open %v is failed", input.Err())

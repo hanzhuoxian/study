@@ -13,7 +13,11 @@ func main() {
 	count := make(map[string]int)
 	input := bufio.NewScanner(os.Stdin)
 	for input.Scan() {
-		count[input.Text()]++
+		t := input.Text()
+		if t == "quit" {
+			break
+		}
+		count[t]++
 		if input.Err() != nil {
 			panic("input is error")
 		}
