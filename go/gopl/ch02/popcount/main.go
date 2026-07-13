@@ -23,5 +23,5 @@ func PopCount(x uint64) int {
 }
 
 func main() {
-	fmt.Println(PopCount(2))
+	fmt.Println(PopCount(5))
 }
