@@ -28,4 +28,24 @@ func main() {
 	fmt.Println(Q2)     // ["April" "May" "June"]
 	fmt.Println(summer) // ["June" "July" "August"]
 
+	endlessSummer := summer[:5] // 没有超出 cap 会扩展 slice
+	fmt.Println(endlessSummer)
+
+	var s []int
+	if s == nil {
+		fmt.Println("s = nil")
+	}
+	s = nil
+	if s == nil {
+		fmt.Println("s = nil")
+	}
+	s = []int(nil)
+	if s == nil {
+		fmt.Println("s = nil")
+	}
+	s = []int{}
+
+	if s != nil {
+		fmt.Println("s != nil")
+	}
 }
