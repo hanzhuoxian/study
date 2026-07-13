@@ -10,7 +10,6 @@ import (
 	"math"
 	"math/rand"
 	"os"
-	"time"
 )
 
 var palette = []color.Color{color.White, color.Black}
@@ -21,7 +20,6 @@ const (
 )
 
 func main() {
-	rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 	lissajous(os.Stdout)
 }
 
@@ -34,7 +32,7 @@ func lissajous(out io.Writer) {
 		delay  = 8    //以10ms为单位的帧间延迟
 	)
 
-	freq := rand.Float64() * 3.0 //
+	freq := rand.Float64() * 3.0
 	anim := gif.GIF{LoopCount: nframe}
 	phase := 0.0
 	for i := 0; i < nframe; i++ {

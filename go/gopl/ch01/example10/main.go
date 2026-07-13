@@ -39,7 +39,7 @@ func fetch(url string, t int, ch chan<- string) {
 		}
 		nbytes, err := io.Copy(f, resp.Body)
 		if err != nil {
-			ch <- fmt.Sprintf("copy file is failed")
+			ch <- "copy file is failed"
 		}
 		resp.Body.Close()
 		f.Close()

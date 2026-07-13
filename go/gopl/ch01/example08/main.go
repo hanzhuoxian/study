@@ -17,10 +17,11 @@ func main() {
 		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			resp.Body.Close()
 			fmt.Fprintf(os.Stderr, "fetch: reading %s: %v\n", url, err)
 			os.Exit(1)
 		}
-		defer resp.Body.Close()
+		resp.Body.Close()
 		fmt.Println(string(body))
 	}
 }
