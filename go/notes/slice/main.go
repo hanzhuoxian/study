@@ -9,4 +9,10 @@ func main() {
 		v *= 2
 	}
 	fmt.Println(s)
+
+	s = append(s, s...)
+	fmt.Println(s)
+
+	slice := append([]byte("hello "), "world"...)
+	fmt.Println(string(slice))
 }
