@@ -111,12 +111,36 @@ Map
 
 ### 2.2 负载因子与扩容
 
+两个关键常量：
+
 - 最大平均负载因子 `maxAvgGroupLoad = 7`（即每个 8-slot 的 group 最多用到 7 个 slot，留 1 个空位保证探测序列必然能终止，表不会 100% 填满）。
 - 单张 table 的容量上限 `maxTableCapacity = 1024`（slot 数）。
-- **未达到 1024 上限时**：grow 就是简单地把这张 table 换成一张容量翻倍的新 table，把所有元素按新的探测序列重新摆放。
-- **达到 1024 上限后**：不再继续增大单表容量，而是把这张 table **分裂成两张**（各自容量仍是 1024），通过 **directory + extendible hashing** 来路由：用 hash 的高 `globalDepth` 位选 directory 里的 table；`localDepth` 记录某张 table 是在哪个深度被创建的；当要分裂的 table 的 `localDepth == globalDepth` 时才需要把 directory 翻倍（`globalDepth++`），否则只是多个 directory 项指向同一张新表。
 
-这种设计的好处：**单次扩容的开销有上限**（最大也就是重排 1024 个 slot 所在的表），避免了一次性 rehash 一个几百万 key 的巨大 map 造成的长尾延迟，本质上是把“整体一次性扩容”变成了“可分片、可增量”的扩容。
+**扩容分为两种算法，分界线是单张 table 是否已达到 1024 上限：**
+
+#### 算法一：单表翻倍重排（table growth）
+
+- **触发条件**：某张 table 负载超过 `maxAvgGroupLoad`，且当前容量 **< 1024**。
+- **做法**：分配一张容量**翻倍**的新 table，把旧表所有元素按新探测序列重新摆放，顺带清掉墓碑，再替换 `Map` 内部指向该 table 的指针，旧表回收。
+- 本质就是经典的“哈希表满了就整表 rehash”，只不过对象是一张 ≤1024 slot 的小表。
+
+#### 算法二：分裂 + 可扩展哈希（table split + extendible hashing）
+
+- **触发条件**：table 已达到 **1024 上限**还需继续增长，此时不再增大单表。
+- **做法**：把这张 table **分裂成两张**（各自容量仍是 1024），元素按 hash 的某一位比特分流；通过 **directory（table 指针数组）** 路由——用 hash 的高 `globalDepth` 位在 directory 里选具体 table。
+- **`globalDepth` / `localDepth`**：`localDepth` 记录某张 table 是在哪个深度被创建的。分裂时：
+  - `localDepth == globalDepth`：directory 空间不够区分新旧表，需把 **directory 翻倍**（`globalDepth++`）。
+  - `localDepth < globalDepth`：directory 已够大，只需让原本指向老表的一半 directory 项改指向新表，**不用翻倍 directory**。
+
+#### 为什么分两种
+
+| | 算法一（翻倍重排） | 算法二（分裂 + directory） |
+|---|---|---|
+| 适用 | 小 map（table < 1024） | 大 map（table 满 1024） |
+| 单次开销 | 重排整张表 | **有上限**：最多重排 1024 个 slot |
+| 目的 | 简单高效 | 避免几百万 key 的 map 一次性 rehash 造成的长尾延迟 |
+
+核心动机：把“整个巨大 map 一次性扩容”拆成“一张张 1024 的小表可分片、可增量地扩容”，让**任何单次扩容的最坏耗时都封顶**，本质上是把“整体一次性扩容”变成了“可分片、可增量”的扩容。
 
 ### 2.3 删除与墓碑（tombstone）
 
@@ -140,6 +164,134 @@ Go 语言规范只保证 map 遍历顺序“未指定”，运行时更进一步
 Go 1.24 之前，map 是经典的 `hmap`：一个 bucket 数组，每个 bucket 固定 8 个 slot + 一个 `tophash` 数组（存 hash 高 8 位用于快速比对）+ 一个指向 overflow bucket 的链表指针（bucket 满了就挂一个新 bucket）。它的问题是：overflow 链表退化后查找要挨个遍历链表，且不同 bucket 各自独立扩容概念弱，扩容通常是整个 hmap 一次性搬迁（用 `oldbuckets` 做渐进式迁移，读写时顺带迁移一部分，均摊开销）。
 
 Swiss Table 版本用「control word 并行匹配 + 无 overflow 链表退化」取代了 tophash + overflow bucket，用「directory + 可分裂的多 table」取代了「整体 hmap 渐进式迁移」，在缓存局部性、查找的 SIMD 友好性、扩容的分片粒度上都有改进。对使用者而言，语义（nil map、并发安全性、key 限制、遍历随机化等）完全不变，只是内部实现更换。
+
+### 2.6 关键源码解读
+
+> 源码位置：`$GOROOT/src/internal/runtime/maps/`（本机为 `~/.asdf/installs/golang/1.26.3/go/src/internal/runtime/maps/`），核心文件 `map.go` / `table.go` / `group.go`。注意：标准库 `maps` 包（`$GOROOT/src/maps/maps.go`，即 `maps.Clone`/`maps.Keys` 等泛型辅助函数）**不是**这里说的底层实现，别搞混。`runtime/map.go` 只是把内建 `map` 操作转发到本包的薄封装。
+
+#### ① 顶层结构 `Map`（map.go:195）
+
+```go
+type Map struct {
+    used        uint64        // 元素个数，必须是第一个字段：len() 直接读它
+    seed        uintptr       // 每个 map 独立的随机哈希种子
+    dirPtr      unsafe.Pointer // directory：*[1<<globalDepth]*table；小 map 时直接指向单个 group
+    dirLen      int           // directory 长度；== 0 表示处于“小 map”优化态
+    globalDepth uint8         // directory 索引用的比特数，dirLen == 1<<globalDepth
+    globalShift uint8         // 64 - globalDepth，取 hash 高位时用
+    writing     uint8         // 写入中标志（XOR 1 翻转），并发写检测靠它
+    tombstonePossible bool    // 该 map 是否可能存在墓碑
+    clearSeq    uint64        // Clear 计数器，遍历期间检测 clear
+}
+```
+
+`used` 放第一个字段是硬约束——`len(m)` 由编译器直接读该偏移，`cmd/compile/internal/reflectdata/map.go` 依赖这个布局。
+
+#### ② hash 拆分 H1 / H2（map.go:183）
+
+```go
+func h1(h uintptr) uintptr { return h >> 7 }   // 高 57 位：定位起始 group
+func h2(h uintptr) uintptr { return h & 0x7f }  // 低 7 位：存进控制字节做快速比对
+```
+
+#### ③ 控制字节与 SIMD 并行匹配（group.go:14, 152）
+
+```go
+const (
+    ctrlEmpty   ctrl = 0b10000000  // 空槽：最高位 1
+    ctrlDeleted ctrl = 0b11111110  // 墓碑
+    // full 槽：最高位 0，低 7 位 = 该 key 的 H2
+    bitsetLSB = 0x0101010101010101
+    bitsetMSB = 0x8080808080808080
+)
+
+// 一次比较整组 8 个控制字节，返回“H2 命中”的 slot 位集
+func ctrlGroupMatchH2(g ctrlGroup, h uintptr) bitset {
+    v := uint64(g) ^ (bitsetLSB * uint64(h))       // 逐字节异或目标 H2
+    return bitset(((v - bitsetLSB) &^ v) & bitsetMSB) // 字节为 0（即命中）的位被置 1
+}
+```
+
+这段无分支位运算就是 Swiss Table 的精髓：一条指令级别的操作同时比对 8 个 slot（AMD64 上进一步被替换成 SSE 内建指令），取代了旧版逐个遍历 `tophash` 数组。命中后再用 `match.first()`（本质是 `TrailingZeros64`）取最低命中位。
+
+#### ④ 小 map 优化（map.go:418, 446）
+
+当 map 从没超过 8 个元素时，`dirLen == 0`，`dirPtr` 直接指向**单个 group**，没有 directory、没有 table、没有探测序列：
+
+```go
+func (m *Map) getWithKeySmall(...) {
+    g := groupReference{data: m.dirPtr}
+    match := g.ctrls().matchH2(h2(hash))
+    for match != 0 {
+        i := match.first()
+        if typ.Key.Equal(key, g.key(typ, i)) { return ...true }
+        match = match.removeFirst()
+    }
+    return nil, nil, false // 单 group 无需探测、无需查 empty
+}
+```
+
+小 map 也因此**永远不会有墓碑**（没有探测序列要维护，删除直接置空）。
+
+#### ⑤ 查找主路径 —— 二次探测 + H2 过滤（table.go:164, 194）
+
+```go
+seq := makeProbeSeq(h1(hash), t.groups.lengthMask)
+for ; ; seq = seq.next() {
+    g := t.groups.group(typ, seq.offset)
+    match := g.ctrls().matchH2(h2Hash)
+    for match != 0 {                 // H2 命中的 slot 逐个精确比较
+        i := match.first()
+        if typ.Key.Equal(key, g.key(typ, i)) { return ...true }
+        match = match.removeFirst()
+    }
+    if g.ctrls().matchEmpty() != 0 { // 遇到空槽 = 探测序列到头，确定不存在
+        return nil, nil, false
+    }
+}
+```
+
+探测序列是**三角数二次探测**（table.go:1261）：`p(i) = hash + (i²+i)/2 mod (mask+1)`，当 group 数是 2 的幂时保证不重不漏遍历每个 group。注意墓碑 `ctrlDeleted` 既不匹配 H2、又不匹配 empty，所以探测“跳过墓碑继续走”天然成立——这正是 2.3 节“group 满时删除只能标墓碑”的代码级原因。
+
+#### ⑥ 扩容的两种算法 —— `rehash` 的分叉（table.go:1145）
+
+对应 2.2 节，两种算法就在 `rehash` 一个 if 里分叉：
+
+```go
+func (t *table) rehash(typ *abi.MapType, m *Map) {
+    newCapacity := 2 * t.capacity
+    if newCapacity <= maxTableCapacity { // maxTableCapacity = 1024
+        t.grow(typ, m, newCapacity)      // 算法一：单表翻倍重排
+        return
+    }
+    t.split(typ, m)                      // 算法二：分裂 + 可扩展哈希
+}
+```
+
+`split`（table.go:1179）把 `localDepth++`，按“从高位数第 localDepth 位”把元素分流到 left/right 两张新表，再 `installTableSplit` 挂进 directory（必要时翻倍 directory）：
+
+```go
+mask := localDepthMask(localDepth)   // 1 << (64 - localDepth)
+if hash&mask == 0 { newTable = left } else { newTable = right }
+newTable.uncheckedPutSlot(typ, hash, key, elem) // 已知不重复，免去查重
+```
+
+`grow` 和 `split` 都通过 `uncheckedPutSlot` 逐个重放元素，重放过程顺带丢弃了所有墓碑（源码注释解释：之所以不做 Abseil 那种“原地 rehash”消除墓碑，是因为会打乱 slot 顺序、破坏遍历语义，见 table.go:1146）。
+
+#### ⑦ 并发写检测（map.go:487, 495）
+
+```go
+func (m *Map) PutSlot(...) {
+    if m.writing != 0 { fatal("concurrent map writes") }
+    hash := typ.Hasher(key, m.seed) // 先算 hash（可能 panic），再置标志
+    m.writing ^= 1                  // 用 XOR 翻转而非直接置 1
+    ...
+    if m.writing == 0 { fatal("concurrent map writes") } // 收尾再查一次
+    m.writing ^= 1
+}
+```
+
+用 **XOR 翻转**而不是简单赋值，是为了在多个并发写入者互相踩踏时，让 `writing` 更容易落到非预期值，从而提高冲突被检测到的概率。读路径（`getWithKey`）同样会检查 `m.writing != 0` 并 `fatal("concurrent map read and map write")`。这就是 3.4 节“并发读写是 `fatal` 不可 `recover`”的实现来源。
 
 ## 三、常见陷阱
 
