@@ -113,7 +113,7 @@ Map
 
 两个关键常量：
 
-- 最大平均负载因子 `maxAvgGroupLoad = 7`（即每个 8-slot 的 group 最多用到 7 个 slot，留 1 个空位保证探测序列必然能终止，表不会 100% 填满）。
+- 最大平均负载因子 `maxAvgGroupLoad = 7`：这是**整张 table 的平均阈值，不是每个 group 的硬上限**。整表最多填到 `capacity × 7/8`（即平均每个 8-slot 的 group 用 7 个）就触发扩容——单个 group 完全可以被填满 8 个，满了的元素靠探测溢出到相邻 group；留出的空位是**全表层面**的，只要整表不 100% 填满，遍历所有 group 的探测序列就必然能遇到空槽而终止（否则会死循环）。触发 rehash 的判定是 `used + tombstones > 7/8 × capacity`（把墓碑也算进去，避免表被墓碑占满）。**特例**：单 group 的小表能填到 `capacity - 1`（8 个填 7 个），此时「留 1 个空位」才是字面意义上的单组留一空。
 - 单张 table 的容量上限 `maxTableCapacity = 1024`（slot 数）。
 
 **扩容分为两种算法，分界线是单张 table 是否已达到 1024 上限：**
@@ -167,7 +167,7 @@ Swiss Table 版本用「control word 并行匹配 + 无 overflow 链表退化」
 
 ### 2.6 关键源码解读
 
-> 源码位置：`$GOROOT/src/internal/runtime/maps/`（本机为 `~/.asdf/installs/golang/1.26.3/go/src/internal/runtime/maps/`），核心文件 `map.go` / `table.go` / `group.go`。注意：标准库 `maps` 包（`$GOROOT/src/maps/maps.go`，即 `maps.Clone`/`maps.Keys` 等泛型辅助函数）**不是**这里说的底层实现，别搞混。`runtime/map.go` 只是把内建 `map` 操作转发到本包的薄封装。
+> 源码位置：`$GOROOT/src/internal/runtime/maps/`（本机为 `~/.asdf/installs/golang/1.26.3/go/src/internal/runtime/maps/`），核心文件 `map.go` / `table.go` / `group.go`。
 
 #### ① 顶层结构 `Map`（map.go:195）
 
@@ -213,6 +213,70 @@ func ctrlGroupMatchH2(g ctrlGroup, h uintptr) bitset {
 ```
 
 这段无分支位运算就是 Swiss Table 的精髓：一条指令级别的操作同时比对 8 个 slot（AMD64 上进一步被替换成 SSE 内建指令），取代了旧版逐个遍历 `tophash` 数组。命中后再用 `match.first()`（本质是 `TrailingZeros64`）取最低命中位。
+
+**对比旧版（Go 1.23 及以前，`runtime/map.go`，1.26 已删除）的查找热路径 `mapaccess1`：**
+
+```go
+// 旧版数据结构：hmap + bmap（bucket）
+type hmap struct {
+    count      int            // 元素个数，== len()，也必须是第一个字段
+    B          uint8          // 桶数量 = 2^B
+    hash0      uint32         // 哈希种子
+    buckets    unsafe.Pointer // 2^B 个 bmap
+    oldbuckets unsafe.Pointer // 渐进式扩容时的旧桶数组
+    // ...
+}
+type bmap struct {
+    tophash [bucketCnt]uint8  // bucketCnt=8，存每个 key hash 的“高 8 位”
+    // 后面紧跟 8 个 key、8 个 elem、1 个 overflow 指针（溢出桶链表）
+}
+
+// tophash 取 hash 高 8 位（作用类似新版的 H2，但是 8 位且没有 SIMD 并行）
+func tophash(hash uintptr) uint8 {
+    top := uint8(hash >> (goarch.PtrSize*8 - 8))
+    if top < minTopHash { top += minTopHash } // 低值预留给“迁移状态”标记
+    return top
+}
+
+func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+    // ... nil / 并发写检测 ...
+    hash := t.hasher(key, uintptr(h.hash0))
+    m := bucketMask(h.B)
+    b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize))) // 低位选桶
+    // ... 若正在扩容，可能要去 oldbuckets 找 ...
+    top := tophash(hash)
+bucketloop:
+    for ; b != nil; b = b.overflow(t) {        // ← 外层：遍历 overflow 链表（退化点）
+        for i := uintptr(0); i < bucketCnt; i++ { // ← 内层：逐个字节比 tophash
+            if b.tophash[i] != top {
+                if b.tophash[i] == emptyRest {
+                    break bucketloop              // 后面全空，提前结束
+                }
+                continue                          // 一个一个跳
+            }
+            k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+            if t.indirectkey() { k = *((*unsafe.Pointer)(k)) }
+            if t.key.equal(key, k) {              // tophash 命中后再精确比 key
+                e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+                if t.indirectelem() { e = *((*unsafe.Pointer)(e)) }
+                return e
+            }
+        }
+    }
+    return unsafe.Pointer(&zeroVal[0]) // 没找到返回零值
+}
+```
+
+两版对照：
+
+| | 旧版 `bmap.tophash`（1.23-） | 新版 `ctrlGroup.matchH2`（1.24+） |
+|---|---|---|
+| 快速比对位 | hash 高 8 位，存在 `[8]uint8` | hash 低 7 位（H2），存在 8 字节控制字 |
+| 组内比对方式 | `for i:=0;i<8;i++` **逐字节** `!=` 比较 | 一条位运算/SSE 指令 **8 个并行** |
+| 桶满后的处理 | 挂 **overflow 桶链表**，查找时 `b = b.overflow(t)` 顺链遍历（可能退化成长链） | 无 overflow，按二次探测走**下一个 group**（表内寻址，缓存局部性好） |
+| 结束条件 | `tophash[i] == emptyRest` | `matchEmpty() != 0` |
+
+关键差异就在那两层 `for` 循环：旧版内层是**逐字节比 tophash**、外层是**顺着 overflow 指针遍历链表**；新版把内层 8 次比较压成一条无分支位运算，把外层链表换成表内的二次探测。这就是 2.5 节所说「control word 并行匹配 + 无 overflow 链表退化」的代码级体现。
 
 #### ④ 小 map 优化（map.go:418, 446）
 
