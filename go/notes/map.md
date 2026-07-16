@@ -167,9 +167,27 @@ Swiss Table 版本用「control word 并行匹配 + 无 overflow 链表退化」
 
 ### 2.6 关键源码解读
 
-> 源码位置：`$GOROOT/src/internal/runtime/maps/`（本机为 `~/.asdf/installs/golang/1.26.3/go/src/internal/runtime/maps/`），核心文件 `map.go` / `table.go` / `group.go`。
+> 源码位置：`$GOROOT/src/internal/runtime/maps/`（本机为 `~/.asdf/installs/golang/1.26.3/go/src/internal/runtime/maps/`），核心文件 `map.go` / `table.go` / `group.go`。`runtime/map.go` 只是编译器与本包之间的薄封装桥。
 
-#### ① 顶层结构 `Map`（map.go:195）
+本节按 map 的**生命周期顺序**解读：创建 → 插入 → 查找 → 扩容。整体调用链总览：
+
+```text
+make(map[K]V, hint)                     // 编译器改写成下面的 runtime 调用
+   └─ runtime.makemap(t, hint, m)       // runtime/map.go，薄封装
+        └─ maps.NewMap(t, hint, m, ...) // ① 创建：算容量、建 directory/table
+
+m[k] = v                                // 编译器改写
+   └─ maps.Map.PutSlot                  // ② 插入：三段式
+        ├─ growToSmall   (nil → 单 group)
+        ├─ putSlotSmall  (元素 < 8，装进单 group)
+        ├─ growToTable   (第 8 个元素，小 map 升级为完整 table)
+        └─ table.PutSlot (完整 table 插入；满了触发 rehash)
+             └─ table.rehash            // ④ 扩容：grow / split 二选一
+
+v := m[k]                               // maps.Map.Get → getWithKey → ③ 查找
+```
+
+#### ① 顶层数据结构 `Map` / `table` / `group`（map.go:195、table.go:33）
 
 ```go
 type Map struct {
@@ -183,18 +201,134 @@ type Map struct {
     tombstonePossible bool    // 该 map 是否可能存在墓碑
     clearSeq    uint64        // Clear 计数器，遍历期间检测 clear
 }
+
+type table struct {
+    used       uint16 // 本表元素个数
+    capacity   uint16 // 本表总 slot 数（2^N），≤ maxTableCapacity(1024)
+    growthLeft uint16 // 还能再插几个才需 rehash（= 7/8·capacity - used - tombstones）
+    localDepth uint8  // 本表是在哪个深度被创建的（extendible hashing 用）
+    index      int    // 在 directory 里的首个下标；-1 表示已失效
+    groups     groupsReference // 一段连续的 group 数组
+}
 ```
 
-`used` 放第一个字段是硬约束——`len(m)` 由编译器直接读该偏移，`cmd/compile/internal/reflectdata/map.go` 依赖这个布局。
+`used` 放 `Map` 第一个字段是硬约束——`len(m)` 由编译器直接读该偏移，`cmd/compile/internal/reflectdata/map.go` 依赖这个布局。`growthLeft` 是插入路径判断是否要扩容的核心计数器（见 ②④）。
 
-#### ② hash 拆分 H1 / H2（map.go:183）
+#### ② 创建 map：`make` → `makemap` → `NewMap`（runtime/map.go:62、map.go:264）
+
+`make(map[K]V, hint)` 是编译器内建，会被改写成对 `runtime.makemap`（三个变体之一）的调用，参数由编译器**合成**：
+
+```go
+// runtime/map.go：薄封装，转发给真正实现
+func makemap(t *abi.MapType, hint int, m *Map) *maps.Map {
+    if hint < 0 { hint = 0 }
+    return maps.NewMap(t, uintptr(hint), m, maxAlloc)
+}
+```
+
+- `t *abi.MapType`：编译器为 `map[K]V` 这个**具体类型**静态生成的类型描述符（含 `Hasher`、`Key.Equal`、各字段大小、`IndirectKey/Elem` 等），只读数据段里。
+- `hint`：`make` 的第二个参数（预估元素数），省略则为 0。
+- `m *Map`：**逃逸分析**产物——若 map 不逃逸，编译器在栈上预留 `Map`（甚至第一个 group）并传地址进来，省一次堆分配；逃逸则传 nil。
+
+真正干活的 `NewMap`：
+
+```go
+func NewMap(mt *abi.MapType, hint uintptr, m *Map, maxAlloc uintptr) *Map {
+    if m == nil { m = new(Map) }
+    m.seed = uintptr(rand())                 // 每个 map 独立随机种子（遍历随机化、防哈希碰撞攻击）
+
+    if hint <= abi.MapGroupSlots {           // hint ≤ 8：小 map，压根不预分配
+        return m                             // 保持 dirLen==0，等第一次写入再懒分配（见 ③）
+    }
+
+    // 完整 map：把 hint 换算成 slot 容量
+    targetCapacity := (hint * abi.MapGroupSlots) / maxAvgGroupLoad // = hint*8/7
+    if targetCapacity < hint { return m }    // uintptr 乘法溢出保护 → 放弃预分配，返回空 map
+
+    dirSize := (uint64(targetCapacity) + maxTableCapacity - 1) / maxTableCapacity
+    dirSize, overflow := alignUpPow2(dirSize)                     // directory 长度向上取 2 的幂
+    // ... 再做若干溢出 / 超 maxAlloc 检查，任一失败都 return m（退化成空 map）...
+
+    m.globalDepth = uint8(sys.TrailingZeros64(dirSize))
+    m.globalShift = depthToShift(m.globalDepth)
+    directory := make([]*table, dirSize)
+    for i := range directory {
+        directory[i] = newTable(mt, uint64(targetCapacity)/dirSize, i, m.globalDepth)
+    }
+    m.dirPtr = unsafe.Pointer(&directory[0])
+    m.dirLen = len(directory)
+    return m
+}
+```
+
+两个要点：
+
+1. **`hint*8/7` 换算**：因为负载因子只有 7/8（2.2 节），要「无扩容装下 hint 个元素」就得预留 `hint × 8/7` 的容量，只分配 `hint` 个会一装就满。
+2. **小 map 懒分配**：`hint ≤ 8` 直接返回，连 group 都不分配——省掉「创建后从没写入」场景的开销，第一次写入时才由 `growToSmall` 补上（见 ③）。所有异常路径（溢出、超内存上限）也都是 `return m` 退化成空 map，而非 panic——hint 只是提示。
+
+#### ③ 插入：`PutSlot` 三段式路径（map.go:486）
+
+`m[k]=v` 改写成 `PutSlot`（返回 elem 槽地址，编译器再往里写 value）。它按 map 当前规模分三段走：
+
+```go
+func (m *Map) PutSlot(typ *abi.MapType, key unsafe.Pointer) unsafe.Pointer {
+    if m.writing != 0 { fatal("concurrent map writes") }
+    hash := typ.Hasher(key, m.seed)
+    m.writing ^= 1
+
+    if m.dirPtr == nil {           // 第一次写入一个从没分配过的 map
+        m.growToSmall(typ)         //   → 分配「单个 group」（8 slot），dirLen 仍为 0
+    }
+    if m.dirLen == 0 {             // 处于小 map 态
+        if m.used < abi.MapGroupSlots {
+            elem := m.putSlotSmall(typ, hash, key)  // 段①：装进单 group，无探测无墓碑
+            m.writing ^= 1
+            return elem
+        }
+        m.growToTable(typ)         // 段②：第 8 个元素，把单 group 升级为完整 table
+    }
+    for {                          // 段③：完整 table
+        idx := m.directoryIndex(hash)               // hash 高位选 table
+        elem, ok := m.directoryAt(idx).PutSlot(typ, m, hash, key)
+        if !ok { continue }        // ok==false：表刚被 split，重新选表再来
+        m.writing ^= 1
+        return elem
+    }
+}
+```
+
+- **段①小 map（`putSlotSmall`）**：只有一个 group，`matchH2` 找现有 key（有则更新），否则 `matchEmptyOrDeleted` 找空位插入。小 map 没有探测序列、**永远没有墓碑**（删除直接置空）。
+- **`growToSmall`**（map.go:598）：`newGroups(typ, 1)` 只分配一个 group、`setEmpty()` 把 8 个控制字节全置空。
+- **`growToTable`**（map.go:608）：当第 8 个元素来时，新建一张 `2*MapGroupSlots`（=16 slot）的 table，把原单 group 的元素 `uncheckedPutSlot` 搬进去，建一个长度为 1 的 directory 挂上，`dirLen` 变 1，从此进入完整 table 世界。
+- **段③完整 table（`table.PutSlot`，table.go:266）**：真正的探测插入，逻辑见下。
+
+`table.PutSlot` 里决定「扩容」的关键片段：
+
+```go
+// ...沿探测序列找到 key（更新）或找到落脚的空/墓碑位...
+if t.growthLeft == 0 {
+    t.pruneTombstones(typ, m)   // 先试着清理墓碑腾地方
+}
+if t.growthLeft > 0 {
+    // 有空间：写入 key/elem，设置控制字节，growthLeft--、used++、m.used++
+    return slotElem, true
+}
+t.rehash(typ, m)               // 实在没空间了 → 扩容
+return nil, false              // 通知上层 PutSlot 重新选表重试（表可能已 split）
+```
+
+即：`growthLeft`（初值 `7/8·capacity`）耗尽时，先尝试 `pruneTombstones` 回收墓碑；仍不够才 `rehash`。插入时若沿途遇到过墓碑，会优先复用墓碑位（不消耗 `growthLeft`）——对应 2.3 节「插入优先复用墓碑」。
+
+#### ④ hash 拆分 H1 / H2（map.go:183）
+
+查找和插入都要先把 hash 拆成两段：
 
 ```go
 func h1(h uintptr) uintptr { return h >> 7 }   // 高 57 位：定位起始 group
 func h2(h uintptr) uintptr { return h & 0x7f }  // 低 7 位：存进控制字节做快速比对
 ```
 
-#### ③ 控制字节与 SIMD 并行匹配（group.go:14, 152）
+#### ⑤ 控制字节与 SIMD 并行匹配（group.go:14, 152）
 
 ```go
 const (
@@ -278,9 +412,11 @@ bucketloop:
 
 关键差异就在那两层 `for` 循环：旧版内层是**逐字节比 tophash**、外层是**顺着 overflow 指针遍历链表**；新版把内层 8 次比较压成一条无分支位运算，把外层链表换成表内的二次探测。这就是 2.5 节所说「control word 并行匹配 + 无 overflow 链表退化」的代码级体现。
 
-#### ④ 小 map 优化（map.go:418, 446）
+#### ⑥ 查找：小 map 直查 + 完整表二次探测（map.go:407/446、table.go:164）
 
-当 map 从没超过 8 个元素时，`dirLen == 0`，`dirPtr` 直接指向**单个 group**，没有 directory、没有 table、没有探测序列：
+查找入口 `getWithKey` 先按 `dirLen` 分流：`dirLen==0` 走小 map 直查，否则用 hash 高位选 table 再探测。
+
+**小 map 直查（`getWithKeySmall`）**——只有一个 group，无 directory、无探测序列：
 
 ```go
 func (m *Map) getWithKeySmall(...) {
@@ -295,9 +431,7 @@ func (m *Map) getWithKeySmall(...) {
 }
 ```
 
-小 map 也因此**永远不会有墓碑**（没有探测序列要维护，删除直接置空）。
-
-#### ⑤ 查找主路径 —— 二次探测 + H2 过滤（table.go:164, 194）
+**完整表查找（`table.getWithKey`）——二次探测 + H2 过滤**：
 
 ```go
 seq := makeProbeSeq(h1(hash), t.groups.lengthMask)
@@ -317,7 +451,7 @@ for ; ; seq = seq.next() {
 
 探测序列是**三角数二次探测**（table.go:1261）：`p(i) = hash + (i²+i)/2 mod (mask+1)`，当 group 数是 2 的幂时保证不重不漏遍历每个 group。注意墓碑 `ctrlDeleted` 既不匹配 H2、又不匹配 empty，所以探测“跳过墓碑继续走”天然成立——这正是 2.3 节“group 满时删除只能标墓碑”的代码级原因。
 
-#### ⑥ 扩容的两种算法 —— `rehash` 的分叉（table.go:1145）
+#### ⑦ 扩容的两种算法 —— `rehash` 的分叉（table.go:1145）
 
 对应 2.2 节，两种算法就在 `rehash` 一个 if 里分叉：
 
@@ -342,7 +476,7 @@ newTable.uncheckedPutSlot(typ, hash, key, elem) // 已知不重复，免去查�
 
 `grow` 和 `split` 都通过 `uncheckedPutSlot` 逐个重放元素，重放过程顺带丢弃了所有墓碑（源码注释解释：之所以不做 Abseil 那种“原地 rehash”消除墓碑，是因为会打乱 slot 顺序、破坏遍历语义，见 table.go:1146）。
 
-#### ⑦ 并发写检测（map.go:487, 495）
+#### ⑧ 并发写检测（map.go:487, 495）
 
 ```go
 func (m *Map) PutSlot(...) {
