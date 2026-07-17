@@ -40,10 +40,8 @@ func main() {
 	}
 
 	fmt.Printf("\nlen\tcount\n")
-	for i, n := range utfLen {
-		if i > 0 {
-			fmt.Printf("%d\t%d\n", i, n)
-		}
+	for i, n := range utfLen[1:] {
+		fmt.Printf("%d\t%d\n", i, n)
 	}
 	if invalid > 0 {
 		fmt.Printf("\n%d invalid UTF-8 characters\n", invalid)
