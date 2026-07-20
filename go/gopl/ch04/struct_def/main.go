@@ -41,6 +41,36 @@ func main() {
 
 	GetEmployeeByID(1).Position = "CTO"
 	fmt.Println(GetEmployeeByID(1).Position)
+
+	// 结构体嵌入
+	wheel := Wheel{
+		Circle: Circle{
+			Center: Point{X: 1, Y: 1},
+			Radius: 3,
+		},
+		Spokes: 26,
+	}
+
+	fmt.Println(wheel)
+	fmt.Println("x = ", wheel.Circle.Center.X)
+
+	// 匿名结构体
+	var simpleWheel SimpleWheel
+	simpleWheel.X = 1
+	simpleWheel.Y = 2
+	simpleWheel.Radius = 3
+	simpleWheel.Spokes = 4
+	fmt.Println(simpleWheel)
+
+	// 可以直接访问叶子属性而不需要写出完整路径
+	simpleWheel = SimpleWheel{
+		SimpleCircle: SimpleCircle{
+			Point:  Point{X: 1, Y: 1},
+			Radius: 3,
+		},
+		Spokes: 26,
+	}
+	fmt.Println(simpleWheel)
 }
 
 var employees []Employee
@@ -52,4 +82,28 @@ func GetEmployeeByID(id int) *Employee {
 		}
 	}
 	return nil
+}
+
+type Point struct {
+	X, Y int
+}
+
+type Circle struct {
+	Center Point
+	Radius int
+}
+
+type Wheel struct {
+	Circle Circle
+	Spokes int
+}
+
+type SimpleCircle struct {
+	Point
+	Radius int
+}
+
+type SimpleWheel struct {
+	SimpleCircle
+	Spokes int
 }
