@@ -44,8 +44,15 @@ func main() {
 		ptrs = append(ptrs, &v) // 错误：&v 是循环变量的地址
 	}
 
+	for _, v := range ptrs {
+		v.V = 5
+	}
+
 	for i, v := range ptrs {
 		fmt.Println(i, v)
 	}
 
+	for i, v := range s {
+		fmt.Println(i, v)
+	}
 }
