@@ -1,4 +1,4 @@
-# encoding/json 学习笔记
+# json
 
 > 基于 Go 1.26（`GOEXPERIMENT=jsonv2` 关闭时的默认实现，即 `encode.go` / `decode.go` / `tags.go`）源码整理。
 
