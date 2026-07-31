@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"os"
 	"sync"
 )
 
@@ -19,4 +21,35 @@ func handle(w io.Writer, data []string) {
 		buf.WriteString(s)
 	}
 	w.Write(buf.Bytes())
+}
+
+func main() {
+	fmt.Println()
+	handle(os.Stdout, []string{"hello"})
+	fmt.Println()
+	var p sync.Pool      // New == nil
+	fmt.Println(p.Get()) // <nil>：池空且没有 New，直接返回 nil
+}
+
+func work(b *bytes.Buffer) {
+	for i := 0; i < 100; i++ {
+		b.WriteString("hello world")
+	}
+}
+
+func workNoPool() {
+	buf := new(bytes.Buffer)
+	work(buf)
+}
+
+var workBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func workWithPool() {
+	buf := workBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer workBufPool.Put(buf)
+
+	work(buf)
 }

@@ -68,34 +68,34 @@ return → runtime.main 继续 → exit(0)  进程结束
 
 程序真正的入口点是平台相关的 `_rt0_arm64_darwin`，它整理好 `argc`/`argv` 后跳转到与平台无关的 `runtime·rt0_go`（[asm_arm64.s:105](../../../../.asdf/installs/golang/1.26.3/go/src/runtime/asm_arm64.s)）。这段汇编做的都是「在能运行 Go 代码之前必须用汇编手工完成」的事：
 
-1. **初始化 TLS（线程本地存储）**：`tlsinit`，为后续 `g` 寄存器的存取做准备。
-2. **构造 g0 的栈**：把操作系统给的初始栈划出一段作为 `g0`（调度用的系统栈）的栈空间，设置 `stackguard`。
+   1. **初始化 TLS（线程本地存储）**：`tlsinit`，为后续 `g` 寄存器的存取做准备。
+1. **构造 g0 的栈**：把操作系统给的初始栈划出一段作为 `g0`（调度用的系统栈）的栈空间，设置 `stackguard`。
    ```asm
    MOVD  $runtime·g0(SB), g          // g 寄存器指向 g0
    ...
    MOVD  R7, (g_stack+stack_hi)(g)   // 栈高地址
    ```
-3. **绑定 m0 与 g0**：`m0` 是主线程对应的 M，`g0` 是它的调度栈。
+2. **绑定 m0 与 g0**：`m0` 是主线程对应的 M，`g0` 是它的调度栈。
    ```asm
    MOVD  $runtime·m0(SB), R0
    MOVD  g, m_g0(R0)   // m0.g0 = g0
    MOVD  R0, g_m(g)    // g0.m  = m0
    ```
    > `m0` 和 `g0` 都是全局变量（不是堆分配），进程唯一。
-4. **依次调用四个初始化函数**，这是整个引导的核心：
+3. **依次调用四个初始化函数**，这是整个引导的核心：
    ```asm
    BL  runtime·args(SB)       // 保存 argc/argv
    BL  runtime·osinit(SB)     // 操作系统相关初始化（如 numCPUStartup = CPU 核数）
    BL  runtime·schedinit(SB)  // 调度器、内存分配器、GC 的初始化
    ```
-5. **创建主 goroutine**：把 `runtime.main` 的地址作为入口，交给 `newproc` 创建第一个「真正的」goroutine（即主 goroutine，`goid=1`）。
+4. **创建主 goroutine**：把 `runtime.main` 的地址作为入口，交给 `newproc` 创建第一个「真正的」goroutine（即主 goroutine，`goid=1`）。
    ```asm
    MOVD  $runtime·mainPC(SB), R0   // mainPC 数据段里存的是 runtime·main 的地址
    ...
    BL    runtime·newproc(SB)
    ```
    注意：**此时只是把主 goroutine 放进运行队列，还没开始跑。**
-6. **启动 M0**：
+5. **启动 M0**：
    ```asm
    BL  runtime·mstart(SB)
    UNDEF                       // mstart 永不返回，返回了就是 bug
@@ -105,18 +105,18 @@ return → runtime.main 继续 → exit(0)  进程结束
 
 `schedinit` 运行在 `g0` 上，是「让 runtime 变得可用」的总开关，关键步骤：
 
-| 调用 | 作用 |
-|------|------|
-| `lockInit(...)` 一堆 | 初始化各类全局锁 |
-| `worldStopped()` | 世界起步时是「停止」状态，P 还不能运行 |
-| `stackinit()` | 栈分配器（栈缓存池） |
-| `mallocinit()` | 堆内存分配器（mheap/mcentral/mcache 等） |
-| `mcommoninit(gp.m, -1)` | 初始化 m0 的公共字段 |
-| `gcinit()` | GC 相关数据结构初始化（但还没启动 GC） |
-| `goargs()` / `goenvs()` | 把命令行参数、环境变量转成 Go 的 slice |
-| 读取 `GOMAXPROCS` | 决定 P 的数量：环境变量优先，否则用 CPU 核数 |
-| `procresize(procs)` | **按 GOMAXPROCS 创建 P（processor）数组**，并把当前 M 关联一个 P |
-| `worldStarted()` | 世界启动，P 可以运行了 |
+| 调用                    | 作用                                                             |
+| ----------------------- | ---------------------------------------------------------------- |
+| `lockInit(...)` 一堆    | 初始化各类全局锁                                                 |
+| `worldStopped()`        | 世界起步时是「停止」状态，P 还不能运行                           |
+| `stackinit()`           | 栈分配器（栈缓存池）                                             |
+| `mallocinit()`          | 堆内存分配器（mheap/mcentral/mcache 等）                         |
+| `mcommoninit(gp.m, -1)` | 初始化 m0 的公共字段                                             |
+| `gcinit()`              | GC 相关数据结构初始化（但还没启动 GC）                           |
+| `goargs()` / `goenvs()` | 把命令行参数、环境变量转成 Go 的 slice                           |
+| 读取 `GOMAXPROCS`       | 决定 P 的数量：环境变量优先，否则用 CPU 核数                     |
+| `procresize(procs)`     | **按 GOMAXPROCS 创建 P（processor）数组**，并把当前 M 关联一个 P |
+| `worldStarted()`        | 世界启动，P 可以运行了                                           |
 
 到此为止，GMP 里的 **G（g0）、M（m0）、P（procresize 创建）** 三者都已就位。
 
@@ -242,14 +242,14 @@ go func() {
 
 ## 小结：GMP 三要素何时诞生
 
-| 要素 | 诞生时机 | 说明 |
-|------|----------|------|
-| **g0 / m0** | `rt0_go` 汇编阶段 | 全局变量，进程唯一，负责引导 |
-| **P** | `schedinit → procresize` | 数量 = `GOMAXPROCS`（默认 CPU 核数） |
-| **主 goroutine** | `rt0_go → newproc` | 入口是 `runtime.main`，`goid=1` |
-| **sysmon 线程** | `runtime.main` 内 `newm(sysmon)` | 后台监控，不绑定 P |
-| **GC** | `runtime.main` 内 `gcenable` | init 之后、用户 main 之前开启 |
-| **用户 goroutine** | `main.main` 里的 `go` 语句 | 由 `newproc` 创建，入队等待调度 |
+| 要素               | 诞生时机                         | 说明                                 |
+| ------------------ | -------------------------------- | ------------------------------------ |
+| **g0 / m0**        | `rt0_go` 汇编阶段                | 全局变量，进程唯一，负责引导         |
+| **P**              | `schedinit → procresize`         | 数量 = `GOMAXPROCS`（默认 CPU 核数） |
+| **主 goroutine**   | `rt0_go → newproc`               | 入口是 `runtime.main`，`goid=1`      |
+| **sysmon 线程**    | `runtime.main` 内 `newm(sysmon)` | 后台监控，不绑定 P                   |
+| **GC**             | `runtime.main` 内 `gcenable`     | init 之后、用户 main 之前开启        |
+| **用户 goroutine** | `main.main` 里的 `go` 语句       | 由 `newproc` 创建，入队等待调度      |
 
 整条链路的设计精髓：**运行时先把自己（内存、调度器、GC、监控）全部拉起来，再以「一个普通 goroutine」的形式去运行用户的 `main`。** 用户看到的 `main` 只是 runtime 大厦封顶后的一次函数调用。
 
