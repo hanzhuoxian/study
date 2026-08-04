@@ -13,7 +13,10 @@ import (
 
 // 练习 4.13： 使用开放电影数据库的JSON服务接口，允许你检索和下载 https://omdbapi.com/ 上电影的名字和对应的海报图像。编写一个poster工具，通过命令行输入的电影名字，下载对应的海报。
 
+const PosterURL = "https://www.omdbapi.com/?apikey=%s&s=%s"
+
 func main() {
+	fmt.Println("请输入电影名称:")
 	input := bufio.NewScanner(os.Stdin)
 	for input.Scan() {
 		line := input.Text()
@@ -39,20 +42,24 @@ func main() {
 	}
 }
 
-const PosterURL = ""
-
 type Movie struct {
 	Url  string
 	Name string
 }
 
+func getPosterUrl(name string) string {
+	return fmt.Sprintf(PosterURL, os.Getenv("OMDBAPI_KEY"), name)
+}
 func search(name string) ([]*Movie, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(PosterURL)
+	resp, err := client.Get(getPosterUrl(name))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Http 错误 %d %s", resp.StatusCode, resp.Status)
+	}
 	var m []*Movie
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

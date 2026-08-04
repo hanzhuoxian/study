@@ -103,14 +103,14 @@ BenchmarkWithPool-10      38.62 ns/op      0 B/op    0 allocs/op
 
 ### 1.6 标准库中的用法（都是很好的参考样本）
 
-| 位置 | 池化对象 | 值得学的点 |
-|---|---|---|
-| `fmt/print.go:146` `ppFree` | `*pp`（printer 状态机） | `free()` 里对 buffer 做 **64KB 硬上限**，超了就丢 buffer 只回收 printer（`golang.org/issue/23199`） |
-| `encoding/json/encode.go:313` `encodeStatePool` | `*encodeState` | 每次 Marshal 复用编码缓冲 |
-| `encoding/json/scanner.go:89` `scannerPool` | `*scanner` | 解析器状态机复用 |
-| `net/http/server.go:827` `bufioReaderPool` / `bufioWriter2kPool` / `bufioWriter4kPool` | `*bufio.Reader` / `*bufio.Writer` | **按容量分成多个池**（2k/4k），保证同一个池里对象大小均匀 |
-| `net/http/h2_bundle.go:9136` `http2bufPools [7]sync.Pool` | `*[]byte` | 按 16KB/32KB/…/512KB **分 7 档**，`bufPoolIndex(size)` 用 `bits.Len` 算档位；取出后还要校验 `len(*bp) >= scratchLen` |
-| `net/http/header.go:160` `headerSorterPool` | `*headerSorter` | 排序临时结构复用 |
+| 位置                                                                                   | 池化对象                          | 值得学的点                                                                                                           |
+| -------------------------------------------------------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `fmt/print.go:146` `ppFree`                                                            | `*pp`（printer 状态机）           | `free()` 里对 buffer 做 **64KB 硬上限**，超了就丢 buffer 只回收 printer（`golang.org/issue/23199`）                  |
+| `encoding/json/encode.go:313` `encodeStatePool`                                        | `*encodeState`                    | 每次 Marshal 复用编码缓冲                                                                                            |
+| `encoding/json/scanner.go:89` `scannerPool`                                            | `*scanner`                        | 解析器状态机复用                                                                                                     |
+| `net/http/server.go:827` `bufioReaderPool` / `bufioWriter2kPool` / `bufioWriter4kPool` | `*bufio.Reader` / `*bufio.Writer` | **按容量分成多个池**（2k/4k），保证同一个池里对象大小均匀                                                            |
+| `net/http/h2_bundle.go:9136` `http2bufPools [7]sync.Pool`                              | `*[]byte`                         | 按 16KB/32KB/…/512KB **分 7 档**，`bufPoolIndex(size)` 用 `bits.Len` 算档位；取出后还要校验 `len(*bp) >= scratchLen` |
+| `net/http/header.go:160` `headerSorterPool`                                            | `*headerSorter`                   | 排序临时结构复用                                                                                                     |
 
 `fmt` 和 `h2` 这两个例子回答了同一个问题的两种解法：**「大小不均匀的对象怎么池化」**——要么设上限丢弃超大的（`fmt`），要么按大小分级建多个池（`h2`）。
 
@@ -118,14 +118,14 @@ BenchmarkWithPool-10      38.62 ns/op      0 B/op    0 allocs/op
 
 `sync.Pool` 缺失所有资源池该有的能力，别把它当资源池：
 
-| 需求 | sync.Pool 是否支持 | 说明 |
-|---|---|---|
-| 限制池内对象总数 | ❌ | 没有任何容量上限，Put 多少存多少 |
-| 保证对象一定能复用 | ❌ | GC 随时清空；文档原文 "may be removed automatically at any time without notification" |
-| 空闲超时回收 | ❌ | 只跟 GC 周期挂钩，与时间无关 |
-| 对象销毁钩子（`Close()`） | ❌ | 对象被丢弃时不会通知你，`net.Conn`/`*sql.DB`/文件句柄放进去就是**句柄泄漏** |
-| 阻塞等待可用对象 | ❌ | Get 永不阻塞 |
-| 公平性 / FIFO | ❌ | Get 返回哪个对象完全不确定 |
+| 需求                      | sync.Pool 是否支持 | 说明                                                                                  |
+| ------------------------- | ------------------ | ------------------------------------------------------------------------------------- |
+| 限制池内对象总数          | ❌                  | 没有任何容量上限，Put 多少存多少                                                      |
+| 保证对象一定能复用        | ❌                  | GC 随时清空；文档原文 "may be removed automatically at any time without notification" |
+| 空闲超时回收              | ❌                  | 只跟 GC 周期挂钩，与时间无关                                                          |
+| 对象销毁钩子（`Close()`） | ❌                  | 对象被丢弃时不会通知你，`net.Conn`/`*sql.DB`/文件句柄放进去就是**句柄泄漏**           |
+| 阻塞等待可用对象          | ❌                  | Get 永不阻塞                                                                          |
+| 公平性 / FIFO             | ❌                  | Get 返回哪个对象完全不确定                                                            |
 
 结论：**只放「纯内存、无外部资源、可被随时丢弃」的对象**。连接池请用 `database/sql` 或第三方（`puddle`、`grpc` 内建池）；需要限量/带 Close 的对象池，用 `chan *T` 自己实现。
 
@@ -229,11 +229,11 @@ headTail atomic.Uint64   // 高 32 位 head，低 32 位 tail
 
 三个操作的分工：
 
-| 操作 | 调用者 | 同步方式 |
-|---|---|---|
+| 操作       | 调用者                 | 同步方式                                                                             |
+| ---------- | ---------------------- | ------------------------------------------------------------------------------------ |
 | `pushHead` | 只有本地 P（单生产者） | 先 load `headTail` 判满，写 slot，再 `Add` 推进 head。**推进 head 本身就是发布屏障** |
-| `popHead` | 只有本地 P（单生产者） | CAS 先把 head 减 1「抢回」slot 所有权，成功后才读值 |
-| `popTail` | 任意 P（多消费者） | CAS 把 tail 加 1，成功者独占该 slot |
+| `popHead`  | 只有本地 P（单生产者） | CAS 先把 head 减 1「抢回」slot 所有权，成功后才读值                                  |
+| `popTail`  | 任意 P（多消费者）     | CAS 把 tail 加 1，成功者独占该 slot                                                  |
 
 **槽位所有权的交接**是这里最精妙的部分。`vals[i].typ == nil` 表示空槽：
 

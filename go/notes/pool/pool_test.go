@@ -3,13 +3,13 @@ package main
 import "testing"
 
 func BenchmarkWorkNoPool(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		workNoPool()
 	}
 }
 
 func BenchmarkWorkWithPool(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		workWithPool()
 	}
 }

@@ -32,8 +32,11 @@ func main() {
 }
 
 func work(b *bytes.Buffer) {
-	for i := 0; i < 100; i++ {
-		b.WriteString("hello world")
+	for _ = range 100 {
+		_, err := b.WriteString("hello world ")
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
