@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
-	"sort"
+	"log"
 )
 
-var prereqs = map[string][]string{
+// **练习5.10：** 重写topoSort函数，用map代替切片并移除对key的排序代码。验证结果的正确性（结果不唯一）。
+
+var preReqs = map[string][]string{
 	"algorithms": {"data structures"},
 	"calculus":   {"linear algebra"},
 	"compilers": {
@@ -22,8 +24,9 @@ var prereqs = map[string][]string{
 	"programming languages": {"data structures", "computer organization"},
 }
 
-func topoSort(m map[string][]string) []string {
-	var order []string
+func topoSort(m map[string][]string) map[int]string {
+	order := make(map[int]string)
+	var i int
 	seen := make(map[string]bool)
 	var visitAll func(items []string)
 	visitAll = func(items []string) {
@@ -31,22 +34,34 @@ func topoSort(m map[string][]string) []string {
 			if !seen[item] {
 				seen[item] = true
 				visitAll(m[item])
-				order = append(order, item)
+				i++
+				order[i] = item
 			}
 		}
 	}
-
-	var keys []string
 	for key := range m {
-		keys = append(keys, key)
+		if !seen[key] {
+			seen[key] = true
+			visitAll(m[key])
+			i++
+			order[i] = key
+		}
 	}
-	sort.Strings(keys)
-	visitAll(keys)
 	return order
 }
 
 func main() {
-	for i, course := range topoSort(prereqs) {
-		fmt.Printf("%d: %s\n", i+1, course)
+	order := topoSort(preReqs)
+	l := len(order)
+	seen := make(map[string]bool)
+	for i := 1; i <= l; i++ {
+		fmt.Printf("%d:%s\n", i, order[i])
+		seen[order[i]] = true
+		for _, p := range preReqs[order[i]] {
+			if !seen[p] {
+				log.Fatal("sort failed")
+			}
+		}
+
 	}
 }

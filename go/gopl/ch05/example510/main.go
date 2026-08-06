@@ -1,9 +1,8 @@
 package main
 
-import (
-	"fmt"
-	"sort"
-)
+// **练习5.10：** 重写topoSort函数，用map代替切片并移除对key的排序代码。验证结果的正确性（结果不唯一）。
+
+import "fmt"
 
 var prereqs = map[string][]string{
 	"algorithms": {"data structures"},
@@ -40,7 +39,6 @@ func topoSort(m map[string][]string) []string {
 	for key := range m {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
 	visitAll(keys)
 	return order
 }
