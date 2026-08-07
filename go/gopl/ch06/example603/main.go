@@ -1,4 +1,4 @@
-package intset
+package main
 
 import (
 	"bytes"
@@ -53,4 +53,62 @@ func (s *IntSet) String() string {
 	}
 	buf.WriteByte('}')
 	return buf.String()
+}
+
+// IntersectWith sets s to the intersection of s and t (elements in both s and t).
+func (s *IntSet) IntersectWith(t *IntSet) {
+	n := min(len(s.words), len(t.words))
+	for i := range n {
+		s.words[i] &= t.words[i]
+	}
+	s.words = s.words[:n]
+}
+
+// DifferenceWith sets s to the difference of s and t (elements in s but not in t).
+func (s *IntSet) DifferenceWith(t *IntSet) {
+	for i := range s.words {
+		if i < len(t.words) {
+			s.words[i] &^= t.words[i]
+		}
+	}
+}
+
+// SymmetricDifference sets s to the symmetric difference of s and t
+// (elements in s or t but not both).
+func (s *IntSet) SymmetricDifference(t *IntSet) {
+	for i, tword := range t.words {
+		if i < len(s.words) {
+			s.words[i] ^= tword
+		} else {
+			s.words = append(s.words, tword)
+		}
+	}
+}
+
+func newIntSet(xs ...int) *IntSet {
+	s := &IntSet{}
+	for _, x := range xs {
+		s.Add(x)
+	}
+	return s
+}
+
+func main() {
+	a := newIntSet(1, 3, 5)
+	b := newIntSet(2, 3, 5)
+
+	fmt.Println("a:", a.String())
+	fmt.Println("b:", b.String())
+
+	intersect := newIntSet(1, 3, 5)
+	intersect.IntersectWith(b)
+	fmt.Println("a ∩ b:", intersect.String())
+
+	difference := newIntSet(1, 3, 5)
+	difference.DifferenceWith(b)
+	fmt.Println("a - b:", difference.String())
+
+	symmetricDifference := newIntSet(1, 3, 5)
+	symmetricDifference.SymmetricDifference(b)
+	fmt.Println("a Δ b:", symmetricDifference.String())
 }
