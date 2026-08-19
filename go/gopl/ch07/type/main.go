@@ -28,4 +28,12 @@ func main() {
 	if b, ok := w.(*bytes.Buffer); !ok {
 		fmt.Printf("%T is not ", b)
 	}
+
+	var x interface{} = 1
+	switch x := x.(type) {
+	case int, int64:
+		fmt.Printf("\n%T %d\n", x, x)
+	default:
+		fmt.Println("default")
+	}
 }
