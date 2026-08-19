@@ -5,6 +5,8 @@ import (
 	"fmt"
 )
 
+// **练习 7.7：** 解释为什么帮助信息在它的默认值是20.0没有包含°C的情况下输出了°C。
+
 type Celsius float64    //摄氏温度
 type Fahrenheit float64 //华氏温度
 type Kelvin float64     //开尔文温度
@@ -24,6 +26,9 @@ func (f *celsiusFlag) Set(s string) error {
 		return nil
 	case "F", "°F":
 		f.Celsius = FToC(Fahrenheit(value))
+		return nil
+	case "K", "°K":
+		f.Celsius = KToC(Kelvin(value))
 		return nil
 	}
 	return fmt.Errorf("invalid temperature %q", s)

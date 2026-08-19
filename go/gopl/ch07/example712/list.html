@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>库存清单</title>
+    <style>
+        body {
+            font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+            margin: 2rem;
+        }
+
+        table {
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            border: 1px solid #ccc;
+            padding: 0.4rem 1rem;
+            text-align: left;
+        }
+
+        th {
+            background: #f2f2f2;
+        }
+
+        td.price {
+            text-align: right;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>库存清单</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>货品</th>
+                <th>价格</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Items}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td class="price">{{.Price}}</td>
+            </tr>
+            {{else}}
+            <tr>
+                <td colspan="2">暂无数据</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+
+</html>

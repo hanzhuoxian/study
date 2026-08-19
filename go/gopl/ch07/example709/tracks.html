@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Tracks</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: .4rem .8rem; text-align: left; }
+  th { background: #f2f2f2; }
+  th a { text-decoration: none; color: inherit; }
+  th sub { color: #888; font-weight: normal; }
+  p { color: #666; }
+</style>
+</head>
+<body>
+<h1>Tracks</h1>
+<p>点击列头排序；重复点击同一列切换升降序。数字表示该列的排序优先级（1 为主键）。</p>
+<table>
+  <tr>
+  {{range .Columns}}
+    <th><a href="/?sort={{.Name}}">{{.Name}}</a>{{with .Arrow}} {{.}}{{end}}{{if .Rank}}<sub>{{.Rank}}</sub>{{end}}</th>
+  {{end}}
+  </tr>
+  {{range .Tracks}}
+  <tr>
+    <td>{{.Title}}</td>
+    <td>{{.Artist}}</td>
+    <td>{{.Album}}</td>
+    <td>{{.Year}}</td>
+    <td>{{.Length}}</td>
+  </tr>
+  {{end}}
+</table>
+</body>
+</html>
