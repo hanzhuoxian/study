@@ -10,13 +10,13 @@ import (
 )
 
 func main() {
-	linster, err := net.Listen("tcp", "localhost:8000")
+	l, err := net.Listen("tcp", "localhost:8000")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	for {
-		conn, err := linster.Accept()
+		conn, err := l.Accept()
 		if err != nil {
 			log.Print(err)
 			continue
