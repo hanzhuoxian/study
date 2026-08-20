@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -20,8 +21,9 @@ func main() {
 			continue
 		}
 
+		fmt.Printf("\naccept %v\n", conn.RemoteAddr())
 		handleConn(conn)
-
+		fmt.Printf("\nhandle done %v\n", conn.RemoteAddr())
 	}
 }
 
@@ -31,6 +33,7 @@ func handleConn(conn net.Conn) {
 		t := time.Now().Format("15:04:05\n")
 		_, err := io.WriteString(conn, t+"")
 		if err != nil {
+			fmt.Printf("%v", err)
 			return
 		}
 		time.Sleep(1 * time.Second)

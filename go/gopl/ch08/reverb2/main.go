@@ -36,9 +36,18 @@ func echo(c net.Conn, shout string, delay time.Duration) {
 }
 
 func handleConn(c net.Conn) {
+	fmt.Printf("conn start: %v\n", c.RemoteAddr())
+	defer func() {
+		fmt.Printf("conn close: %v\n", c.RemoteAddr())
+		c.Close()
+
+	}()
 	input := bufio.NewScanner(c)
 	for input.Scan() {
-		echo(c, input.Text(), 1*time.Second)
+		go echo(c, input.Text(), 1*time.Second)
 	}
-	c.Close()
+
+	if err := input.Err(); err != nil {
+		fmt.Printf("%v", err)
+	}
 }
