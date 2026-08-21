@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -13,7 +12,7 @@ var port = flag.String("port", "8000", "please input port")
 
 func main() {
 	flag.Parse()
-	uri := fmt.Sprintf("%s:%s", "localhost", *port)
+	uri := net.JoinHostPort("localhost", *port)
 	conn, err := net.Dial("tcp", uri)
 	if err != nil {
 		log.Fatal(err)

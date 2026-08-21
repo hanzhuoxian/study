@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -15,7 +14,7 @@ var port = flag.String("port", "8000", "please input port")
 
 func main() {
 	flag.Parse()
-	uri := fmt.Sprintf("%s:%s", "localhost", *port)
+	uri := net.JoinHostPort("localhost", *port)
 	conn, err := net.Dial("tcp", uri)
 	if err != nil {
 		log.Fatal(err)
@@ -27,10 +26,17 @@ func main() {
 		done <- struct{}{}
 	}()
 	mustCopy(conn, os.Stdin)
-	if conn, ok := conn.(*net.TCPConn); ok {
-		conn.CloseRead()
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		log.Fatalf("not a TCP connection: %T", conn)
+	}
+	// 只关闭写方向：服务端会读到 EOF，而后台 goroutine 仍能继续接收回声。
+	if err := tcp.CloseWrite(); err != nil {
+		log.Fatal(err)
 	}
 	<-done
+
+	conn.Close()
 }
 
 func mustCopy(dst io.Writer, src io.Reader) {
