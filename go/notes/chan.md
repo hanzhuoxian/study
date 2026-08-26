@@ -28,11 +28,11 @@ close(ch)       // 关闭
 
 三个操作的阻塞语义：
 
-| 操作      | 无缓冲                       | 有缓冲                     | nil            | 已关闭                     |
-| --------- | ---------------------------- | -------------------------- | -------------- | -------------------------- |
-| 发送      | 阻塞到有接收者**同时**就绪   | 缓冲区满则阻塞             | **永久阻塞**   | **panic**                  |
-| 接收      | 阻塞到有发送者**同时**就绪   | 缓冲区空则阻塞             | **永久阻塞**   | 立即返回（先读完缓冲区）   |
-| close     | 正常                         | 正常                       | **panic**      | **panic**                  |
+| 操作  | 无缓冲                     | 有缓冲         | nil          | 已关闭                   |
+| ----- | -------------------------- | -------------- | ------------ | ------------------------ |
+| 发送  | 阻塞到有接收者**同时**就绪 | 缓冲区满则阻塞 | **永久阻塞** | **panic**                |
+| 接收  | 阻塞到有发送者**同时**就绪 | 缓冲区空则阻塞 | **永久阻塞** | 立即返回（先读完缓冲区） |
+| close | 正常                       | 正常           | **panic**    | **panic**                |
 
 只需记住一句：**"nil 全阻塞，close 后写和再 close 都 panic，读永远安全"**。
 
@@ -455,11 +455,11 @@ func sendDirect(t *_type, sg *sudog, src unsafe.Pointer) {
 
 由此得到一个性能结论：
 
-| channel 类型 | 一次传递的拷贝次数 | 说明                                 |
-| ------------ | ------------------ | ------------------------------------ |
-| 无缓冲       | **1 次**           | 发送者栈 → 接收者栈                  |
-| 有缓冲       | **2 次**           | 发送者栈 → buf → 接收者栈            |
-| 有缓冲但正好有等待者 | **1 次**   | 命中路径 ①，绕过 buf                 |
+| channel 类型         | 一次传递的拷贝次数 | 说明                      |
+| -------------------- | ------------------ | ------------------------- |
+| 无缓冲               | **1 次**           | 发送者栈 → 接收者栈       |
+| 有缓冲               | **2 次**           | 发送者栈 → buf → 接收者栈 |
+| 有缓冲但正好有等待者 | **1 次**           | 命中路径 ①，绕过 buf      |
 
 拷贝的是**元素的完整值**，不是引用。传 1KB 的 struct 就要拷 1KB（有缓冲则拷两遍），所以大对象走 channel 应该传指针，代价是要自己保证所有权移交后不再触碰原对象。
 
@@ -498,11 +498,11 @@ channel 阻塞用的是 `gopark` / `goready`，不是操作系统级阻塞：
 
 `gopark` 的 `waitReason` 决定 panic/`SIGQUIT` 时 goroutine 的状态文字，排查阻塞问题时很有用：
 
-| 状态文字                   | 含义                             |
-| -------------------------- | -------------------------------- |
-| `chan send` / `chan receive` | 正常阻塞在收发上                 |
+| 状态文字                                           | 含义                                 |
+| -------------------------------------------------- | ------------------------------------ |
+| `chan send` / `chan receive`                       | 正常阻塞在收发上                     |
 | `chan send (nil chan)` / `chan receive (nil chan)` | 操作 nil channel，**永远不会被唤醒** |
-| `select`                   | 阻塞在 select 上                 |
+| `select`                                           | 阻塞在 select 上                     |
 
 看到 `(nil chan)` 就可以直接定位到"channel 忘了 make"或"select 里的 channel 变量被置 nil 后没有其他可用 case"。
 
@@ -510,12 +510,12 @@ channel 阻塞用的是 `gopark` / `goready`，不是操作系统级阻塞：
 
 **第一步：编译器先做降级**（`cmd/compile/internal/walk/select.go:33`），大部分 select 根本不会进 `selectgo`：
 
-| case 数量           | 降级为                                        |
-| ------------------- | --------------------------------------------- |
-| `select {}`（0 个） | `block()` —— 直接永久 gopark（`select.go:103`）|
-| 1 个（无 default）  | 直接的 `chansend` / `chanrecv`，退化成普通收发 |
+| case 数量           | 降级为                                                                          |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `select {}`（0 个） | `block()` —— 直接永久 gopark（`select.go:103`）                                 |
+| 1 个（无 default）  | 直接的 `chansend` / `chanrecv`，退化成普通收发                                  |
 | 1 个 + default      | `selectnbsend` / `selectnbrecv`，即 `block=false` 的收发（`chan.go:784`/`804`） |
-| ≥2 个               | 走通用的 `selectgo`                            |
+| ≥2 个               | 走通用的 `selectgo`                                                             |
 
 所以"`select` + `default` 做非阻塞收发"这种写法的开销和普通收发几乎一样，没有 selectgo 的排序和入队成本。
 
@@ -579,14 +579,14 @@ fmt.Println(data)           // ④ 保证能看到 ①，无需额外加锁
 
 ### 2.10 无缓冲 vs 有缓冲：本质区别
 
-| 维度              | 无缓冲（`dataqsiz == 0`）              | 有缓冲（`dataqsiz > 0`）                 |
-| ----------------- | -------------------------------------- | ---------------------------------------- |
-| 语义              | **同步交接（rendezvous）**：双方必须同时就绪 | **异步**：缓冲区没满/没空就不阻塞         |
-| 数据路径          | 栈 → 栈，1 次拷贝                      | 栈 → buf → 栈，2 次拷贝                  |
-| `full()` 判定     | `recvq.first == nil`（没人在等就是"满"） | `qcount == dataqsiz`                     |
-| 发送返回时的含义  | 对方**已取走**（内存模型第 3 条）      | 只表示**已放进缓冲区**，对方可能还没看到 |
-| 是否天然限流      | 是，生产速度被消费速度完全约束         | 否，缓冲区是一段可积压的空间             |
-| 典型用途          | 同步握手、确认、严格的步调对齐         | 解耦生产消费速率、削峰、信号量           |
+| 维度             | 无缓冲（`dataqsiz == 0`）                    | 有缓冲（`dataqsiz > 0`）                 |
+| ---------------- | -------------------------------------------- | ---------------------------------------- |
+| 语义             | **同步交接（rendezvous）**：双方必须同时就绪 | **异步**：缓冲区没满/没空就不阻塞        |
+| 数据路径         | 栈 → 栈，1 次拷贝                            | 栈 → buf → 栈，2 次拷贝                  |
+| `full()` 判定    | `recvq.first == nil`（没人在等就是"满"）     | `qcount == dataqsiz`                     |
+| 发送返回时的含义 | 对方**已取走**（内存模型第 3 条）            | 只表示**已放进缓冲区**，对方可能还没看到 |
+| 是否天然限流     | 是，生产速度被消费速度完全约束               | 否，缓冲区是一段可积压的空间             |
+| 典型用途         | 同步握手、确认、严格的步调对齐               | 解耦生产消费速率、削峰、信号量           |
 
 选型原则：**默认用无缓冲**，因为它的同步语义更强、更容易推理，出问题时立刻阻塞暴露而不是悄悄积压。只有明确需要吸收突发、或需要打破"生产者必须等消费者"的耦合时，才加缓冲，而且容量要有具体依据（例如"就是 worker 数"、"就是并发上限"），不要随手写 100。
 
@@ -606,27 +606,27 @@ fmt.Println(data)           // ④ 保证能看到 ①，无需额外加锁
 
 ### 2.12 关键源码索引
 
-| 关注点              | 位置                                  |
-| ------------------- | ------------------------------------- |
-| `hchan` / `waitq`   | `runtime/chan.go:34` / `:56`          |
-| `makechan`          | `runtime/chan.go:75`                  |
-| `full` / `empty`    | `runtime/chan.go:146` / `:492`        |
-| `chansend`          | `runtime/chan.go:176`                 |
-| `send`              | `runtime/chan.go:318`                 |
-| `sendDirect` / `recvDirect` | `runtime/chan.go:392` / `:405` |
-| `closechan`         | `runtime/chan.go:414`                 |
-| `chanrecv`          | `runtime/chan.go:524`                 |
-| `recv`              | `runtime/chan.go:702`                 |
-| `selectnbsend` / `selectnbrecv` | `runtime/chan.go:784` / `:804` |
-| `chanlen` / `chancap` | `runtime/chan.go:818` / `:835`      |
-| `waitq.enqueue` / `dequeue` | `runtime/chan.go:872` / `:886` |
-| `sellock`（按地址加锁） | `runtime/select.go:34`             |
-| `selectgo`          | `runtime/select.go:122`               |
-| pollorder 洗牌      | `runtime/select.go:167`               |
-| lockorder 堆排序    | `runtime/select.go:206`               |
-| pass 1 / 2 / 3      | `runtime/select.go:264` / `:309` / `:360` |
-| select 编译期降级   | `cmd/compile/internal/walk/select.go:33` |
-| `sudog`             | `runtime/runtime2.go:406`             |
+| 关注点                          | 位置                                      |
+| ------------------------------- | ----------------------------------------- |
+| `hchan` / `waitq`               | `runtime/chan.go:34` / `:56`              |
+| `makechan`                      | `runtime/chan.go:75`                      |
+| `full` / `empty`                | `runtime/chan.go:146` / `:492`            |
+| `chansend`                      | `runtime/chan.go:176`                     |
+| `send`                          | `runtime/chan.go:318`                     |
+| `sendDirect` / `recvDirect`     | `runtime/chan.go:392` / `:405`            |
+| `closechan`                     | `runtime/chan.go:414`                     |
+| `chanrecv`                      | `runtime/chan.go:524`                     |
+| `recv`                          | `runtime/chan.go:702`                     |
+| `selectnbsend` / `selectnbrecv` | `runtime/chan.go:784` / `:804`            |
+| `chanlen` / `chancap`           | `runtime/chan.go:818` / `:835`            |
+| `waitq.enqueue` / `dequeue`     | `runtime/chan.go:872` / `:886`            |
+| `sellock`（按地址加锁）         | `runtime/select.go:34`                    |
+| `selectgo`                      | `runtime/select.go:122`                   |
+| pollorder 洗牌                  | `runtime/select.go:167`                   |
+| lockorder 堆排序                | `runtime/select.go:206`                   |
+| pass 1 / 2 / 3                  | `runtime/select.go:264` / `:309` / `:360` |
+| select 编译期降级               | `cmd/compile/internal/walk/select.go:33`  |
+| `sudog`                         | `runtime/runtime2.go:406`                 |
 
 ## 三、常见陷阱
 
