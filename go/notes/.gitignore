@@ -1,0 +1,5 @@
+# profile / trace 产物（notes/prof、notes/gmp 生成）
+prof/out/
+gmp/tmp/
+*.pprof
+*.test
