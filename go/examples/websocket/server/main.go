@@ -1,11 +1,15 @@
 package main
 
 import (
+	"embed"
 	"log"
 	"net/http"
 
 	"github.com/gorilla/websocket"
 )
+
+//go:embed index.html
+var indexFile embed.FS
 
 // upgrader 用于将 HTTP 连接升级为 WebSocket 连接
 var upgrader = websocket.Upgrader{
@@ -16,6 +20,8 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
+	http.Handle("/", http.FileServer(http.FS(indexFile)))
+
 	// 注册处理 WebSocket 连接的路由
 	http.HandleFunc("/ws", handleWebSocket)
 
@@ -45,8 +51,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// 读取来自客户端的消息
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			// 如果读取出错（例如客户端断开连接），则退出循环
-			log.Println("读取消息失败:", err)
+			// 正常关闭（1000、1001、1005）不是错误，单独打日志
+			if websocket.IsCloseError(err,
+				websocket.CloseNormalClosure,    // 1000
+				websocket.CloseGoingAway,        // 1001
+				websocket.CloseNoStatusReceived, // 1005
+			) {
+				log.Println("客户端正常断开连接:", err)
+			} else {
+				log.Println("读取消息失败:", err)
+			}
 			break
 		}
 		log.Printf("收到消息: %s", message)
