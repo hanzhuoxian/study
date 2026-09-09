@@ -2,6 +2,7 @@ package tst
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 // 被测的 handler
 func rangeHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	q := r.URL.Query().Get("r")
 	lo, hi, err := ParseRange(q)
 	if err != nil {
@@ -18,7 +20,6 @@ func rangeHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]int{"lo": lo, "hi": hi, "sum": Sum(lo, hi)})
 }
 
@@ -51,6 +52,9 @@ func TestRangeHandler(t *testing.T) {
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantCode, rec.Body.String())
 			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
 			if tc.wantCode != http.StatusOK {
 				return
 			}
@@ -79,7 +83,13 @@ func TestWithRealServer(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(body), `"sum":55`) {
 		t.Errorf("body = %s", body)
 	}
@@ -112,6 +122,9 @@ func fetchSum(c *http.Client, url string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return 0, fmt.Errorf("GET %s: unexpected HTTP status %s", url, resp.Status)
+	}
 	var out struct{ Sum int }
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return 0, err
@@ -120,18 +133,31 @@ func fetchSum(c *http.Client, url string) (int, error) {
 }
 
 func TestFetchSumWithStub(t *testing.T) {
-	st := &stubTransport{status: 200, body: `{"sum":42}`}
-	client := &http.Client{Transport: st}
+	t.Run("成功", func(t *testing.T) {
+		st := &stubTransport{status: http.StatusOK, body: `{"sum":42}`}
+		client := &http.Client{Transport: st}
 
-	got, err := fetchSum(client, "http://example.invalid/range?r=1-2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != 42 {
-		t.Errorf("sum = %d, want 42", got)
-	}
-	if !strings.Contains(st.gotURL, "r=1-2") {
-		t.Errorf("请求的 URL = %q", st.gotURL)
-	}
+		got, err := fetchSum(client, "http://example.invalid/range?r=1-2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != 42 {
+			t.Errorf("sum = %d, want 42", got)
+		}
+		if !strings.Contains(st.gotURL, "r=1-2") {
+			t.Errorf("请求的 URL = %q", st.gotURL)
+		}
+	})
+
+	t.Run("非成功状态", func(t *testing.T) {
+		client := &http.Client{Transport: &stubTransport{
+			status: http.StatusServiceUnavailable,
+			body:   `{"sum":42}`,
+		}}
+
+		if _, err := fetchSum(client, "http://example.invalid/range"); err == nil {
+			t.Fatal("fetchSum() error = nil, want non-nil")
+		}
+	})
 	t.Log("→ 打桩 Transport 比起 httptest.NewServer 更快、更好控制错误分支")
 }

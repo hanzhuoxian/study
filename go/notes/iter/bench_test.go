@@ -9,7 +9,7 @@ import (
 
 // go test -bench . -benchmem ./iter
 //
-// 对应 notes/iter.md 2.7（内联与逃逸）、2.8（三种遍历方式实测）、3.9（不要为了好看套迭代器）。
+// 对应 notes/iter.md 的内联与逃逸、三种遍历方式实测、不要为了好看套迭代器等小节。
 
 var (
 	data    = makeData(1000)

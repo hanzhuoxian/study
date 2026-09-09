@@ -1,5 +1,19 @@
 # reflect
 
+> 定位：反射使用、内部表示与性能边界。
+> 前置知识：[Struct](struct.md)、[接口](interface.md)、[泛型](generic.md)、[Iter（range over func 与迭代器）](iter.md)。
+> 配套示例：[refl/main.go](refl/main.go)（`go run ./refl`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础](#topic-1) → [常见陷阱与性能实践](#topic-3)；深入实现或进阶用法时读 [内部表示](#topic-2) → [进阶用法与比较语义](#advanced-reflection)。
+
+**篇内导航**
+
+- [基础](#topic-1)
+- [内部表示](#topic-2)
+- [进阶用法与比较语义](#advanced-reflection)
+- [常见陷阱与性能实践](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3 darwin/amd64`。源码：`reflect/{type,value,deepequal}.go`。配套代码：`notes/refl/`。所有性能数字都是那份 benchmark 的真实输出。
 >
 > 版本演进（用 `$GOROOT/api/go1.*.txt` 可以精确核对）：
@@ -12,7 +26,11 @@
 > - **1.25**：`reflect.TypeAssert[T](v) (T, bool)`。
 > - **1.26**：迭代器版反射 API——`Type.Fields()`/`Methods()`/`Ins()`/`Outs()`、`Value.Fields()`/`Methods()`。
 
+<a id="topic-1"></a>
+
 ## 一、基础
+
+<a id="section-1-1"></a>
 
 ### 1.1 反射三定律
 
@@ -34,6 +52,8 @@ p.SetFloat(7.1)                             // x 变成 7.1
 ```
 
 **第三条是所有反射代码的第一个坎**：`reflect.ValueOf(x)` 拿到的是 `x` 的**副本**（因为参数是 `any`，装箱时就拷贝了），所以永远改不了原值。要改必须传指针再 `.Elem()`。
+
+<a id="section-1-2"></a>
 
 ### 1.2 Type 与 Value
 
@@ -66,7 +86,7 @@ reflect.TypeOf(&u).NumMethod()   // 3 —— 值方法 + 指针方法（SetName�
 
 ```go
 v.Field(0)                       // 按索引，最快
-v.FieldByName("Name")            // 按名字，慢 17 倍（见 3.4）
+v.FieldByName("Name")            // 按名字，慢 17 倍（见 4.4）
 v.FieldByIndex([]int{3, 0})      // 按索引路径，可以穿透嵌套（Addr.City）
 ```
 
@@ -79,6 +99,8 @@ reflect.ValueOf(&u).MethodByName("SetName").
 ```
 
 `reflect.TypeFor[T]()`（1.22+）替代了 `reflect.TypeOf(T{})` 这种"为了拿类型而造一个零值"的写法，对不方便构造零值的类型（比如接口）尤其有用，而且**快 4 倍**（编译期就确定）。
+
+<a id="section-1-3"></a>
 
 ### 1.3 Kind 与 Type 的区别
 
@@ -107,6 +129,8 @@ default: // 基础类型
 
 `Elem()` 的含义**随 Kind 变化**：`Ptr` 是指向的类型、`Slice`/`Array` 是元素类型、`Map` 是 value 类型、`Chan` 是元素类型，其他 Kind 调用会 **panic**。
 
+<a id="section-1-4"></a>
+
 ### 1.4 可设置性（settability）
 
 ```text
@@ -133,6 +157,8 @@ sv.Index(0).CanSet()              // true
 sv.Index(0).SetInt(99)            // ✓ 真的改了原 slice
 ```
 
+<a id="section-1-5"></a>
+
 ### 1.5 struct tag
 
 ```go
@@ -153,6 +179,8 @@ type bad struct {
 
 `go vet` 的 `structtag` 检查能抓到常见错误（我在示例里想演示这个坑，结果被 vet 直接拦下，只能用 `reflect.StructOf` 动态构造）。
 
+<a id="section-1-6"></a>
+
 ### 1.6 1.26 的迭代器 API
 
 ```go
@@ -171,7 +199,11 @@ for v := range s.Seq()  { ... }   // 给的是**下标** 0 1 2（对齐 for i :=
 for i, v := range s.Seq2() { ... } // 0=10 1=20 2=30
 ```
 
-## 二、原理
+<a id="topic-2"></a>
+
+## 二、内部表示
+
+<a id="section-2-1"></a>
 
 ### 2.1 `reflect.Value` 的内部结构
 
@@ -186,7 +218,7 @@ type Value struct {
 
 `reflect.ValueOf(x any)` 做的三件事：
 
-1. **调用方先把具体值装箱进 `eface`**——这一步就可能有一次逃逸和堆分配（mem.md 2.2）；
+1. **调用方先把具体值装箱进 `eface`**——这一步就可能有一次逃逸和堆分配（[常见的逃逸原因](mem.md#section-2-2)）；
 2. 从 eface 里拆出 `(type, data)` 填进 `typ_`/`ptr`；
 3. 按类型算出 `flag`（kind、`flagIndir`、`flagAddr`、`flagRO`）。
 
@@ -195,9 +227,15 @@ type Value struct {
 - **反射慢的根源**是"每次进出反射边界都要装箱/拆箱 + 查表 + 位运算"，而不是某个操作本身多复杂；
 - `Value` 只有 24 字节，所以**按值传递没问题**（标准库到处这么用）。
 
-`flagRO` 就是"未导出字段"的标记——`Interface()` 检查这个位，为真就 panic（见 3.3）。
+`flagRO` 就是"未导出字段"的标记——`Interface()` 检查这个位，为真就 panic（见 [未导出字段](#section-3-3)）。
 
-### 2.2 `MakeFunc`：动态造函数
+<a id="advanced-reflection"></a>
+
+## 三、进阶用法与比较语义
+
+<a id="section-2-2"></a>
+
+### 3.1 `MakeFunc`：动态造函数
 
 ```go
 func wrapWithLog(fn any) any {
@@ -217,7 +255,9 @@ logged(3, 4)                                       // 7，并打日志
 
 代价：**每次调用都要构造 `[]Value`（分配）+ 反射调用**，实测 470ns vs 直接调用 0.64ns——**慢 700 倍**。所以它只适合"每次调用本身就很贵"的场景（网络 RPC），不适合热路径。
 
-### 2.3 `DeepEqual` 的规则与坑
+<a id="section-2-3"></a>
+
+### 3.2 `DeepEqual` 的规则与坑
 
 ```text
 reflect.DeepEqual([]int(nil), []int{})              false ← nil slice ≠ 空 slice
@@ -234,9 +274,13 @@ reflect.DeepEqual(int(1), int64(1))                 false ← 类型必须一致
 2. **测试里优先用 `google/go-cmp`**（`cmp.Diff`）：能配置忽略字段、能自定义比较器、失败时打印可读的 diff；
 3. 简单场景用 `slices.Equal`/`maps.Equal`（1.21+），**不走反射，快一个数量级**。
 
-## 三、常见陷阱
+<a id="topic-3"></a>
 
-### 3.1 反射把编译期错误变成了运行时 panic
+## 四、常见陷阱与性能实践
+
+<a id="section-3-1"></a>
+
+### 4.1 反射把编译期错误变成了运行时 panic
 
 ```text
 改一个不可设置的值           -> reflect.Value.SetString using unaddressable value
@@ -254,7 +298,9 @@ Call 参数个数不对             -> Call with too few input arguments
 2. **在边界处校验 Kind**，别指望上游传对；
 3. **把反射收敛在一个包/一层里**，对外暴露类型安全的 API。
 
-### 3.2 nil 与零值
+<a id="section-3-2"></a>
+
+### 4.2 nil 与零值
 
 ```go
 reflect.ValueOf(nil).IsValid()      // false ← 零值 Value，调任何方法都 panic
@@ -266,7 +312,9 @@ reflect.ValueOf(nilSlice).IsNil()   // true，Len()=0
 - **`IsZero`（1.13+）对所有类型合法**，判断是否等于类型零值；
 - 处理 `any` 参数的反射代码，**第一件事就是 `if !v.IsValid()`**。
 
-### 3.3 未导出字段
+<a id="section-3-3"></a>
+
+### 4.3 未导出字段
 
 ```go
 f := reflect.ValueOf(u).Field(4)   // private 字段
@@ -287,7 +335,9 @@ real.CanSet()          // true
 real.SetString("changed")
 ```
 
-### 3.4 性能：实测数据
+<a id="section-3-4"></a>
+
+### 4.4 性能：实测数据
 
 ```text
 u.Name 直接取字段                0.83 ns/op   0 allocs
@@ -321,16 +371,20 @@ reflect.DeepEqual(a1, a2)      198.0  ns/op   2 allocs     ~29x
 3. **`TypeAssert[T]`（1.25+）实测比 `Interface().(T)` 慢一倍**——它的价值在类型安全和"避免装箱分配"（本例两者都没分配），不在速度；
 4. **`DeepEqual` 有分配**（2 allocs），热路径上别用。
 
-### 3.5 四条优化手法
+<a id="section-3-5"></a>
+
+### 4.5 四条优化手法
 
 标准库和主流库都在用：
 
-1. **缓存 Type 级别的解析结果**——`encoding/json` 的 `cachedTypeFields`（`sync.Map`，见 json.md 2.1）、`reflect.Type` 本身也可以做 map key（同一类型是同一个指针）；
+1. **缓存 Type 级别的解析结果**——`encoding/json` 的 `cachedTypeFields`（`sync.Map`，见 [共享字段解析规则](json.md#topic-18)）、`reflect.Type` 本身也可以做 map key（同一类型是同一个指针）；
 2. **用 `[]int` 索引路径代替 `FieldByName`**——实测 14.45ns vs 59.50ns；
 3. **走一次反射生成闭包，之后走闭包**——`sqlx`、`gorm` 的做法：第一次用反射为每个字段生成 `func(dst, src)`，之后调闭包；
 4. **代码生成**——`easyjson`、`protobuf-go`、`sqlc`：编译期生成零反射代码，快 5-10 倍，代价是要跑 generator。
 
-### 3.6 反射与接口的往返
+<a id="section-3-6"></a>
+
+### 4.6 反射与接口的往返
 
 ```go
 var s fmt.Stringer = User{Name: "bob"}
@@ -351,7 +405,9 @@ reflect.TypeFor[*User]().Implements(stringerType)    // true（值方法被指�
 reflect.TypeFor[Address]().Implements(stringerType)  // false
 ```
 
-### 3.7 什么时候不该用反射
+<a id="section-3-7"></a>
+
+### 4.7 什么时候不该用反射
 
 反射的正当用途其实很窄：
 
@@ -361,52 +417,54 @@ reflect.TypeFor[Address]().Implements(stringerType)  // false
 | ORM / 配置绑定 / 校验器 | ✓（或代码生成） |
 | 测试辅助（深比较、构造随机值） | ✓ |
 | 依赖注入容器 | ✓（启动期一次性） |
-| **业务逻辑里"通用地"处理多种类型** | ✗ **用泛型或接口**（generic.md 1.9） |
+| **业务逻辑里"通用地"处理多种类型** | ✗ **用泛型或接口**（[什么时候用泛型，什么时候用接口](generic.md#section-1-9)） |
 | 绕过未导出字段 | ✗ 设计问题 |
 | 性能敏感的热路径 | ✗ |
 
 **1.18 之后很多老的反射用法应该换成泛型**：如果类型集在编译期是已知的、有限的，泛型能给你同样的复用度 + 类型安全 + 好几倍的性能。
 
-## 四、常见面试题
+<a id="topic-4"></a>
+
+## 五、常见面试题
 
 **1. 反射三定律是什么？**
-① 从接口值可以反射出 `reflect.Value`；② 从 `reflect.Value` 可以还原成接口值；③ 要修改 `reflect.Value`，它必须是"可设置的"（可寻址 + 导出）。第三条的实践后果是 `ValueOf` 必须传指针再 `.Elem()`（见 1.1）。
+① 从接口值可以反射出 `reflect.Value`；② 从 `reflect.Value` 可以还原成接口值；③ 要修改 `reflect.Value`，它必须是"可设置的"（可寻址 + 导出）。第三条的实践后果是 `ValueOf` 必须传指针再 `.Elem()`（见 [反射三定律](#section-1-1)）。
 
 **2. `reflect.Value` 里存了什么？为什么反射慢？**
-`typ_ *abi.Type` + `ptr unsafe.Pointer` + `flag`，共 24 字节。慢的根源是每次进出反射边界都要装箱/拆箱（可能触发堆分配）+ 查类型表 + 位运算判断，而不是单个操作复杂（见 2.1）。
+`typ_ *abi.Type` + `ptr unsafe.Pointer` + `flag`，共 24 字节。慢的根源是每次进出反射边界都要装箱/拆箱（可能触发堆分配）+ 查类型表 + 位运算判断，而不是单个操作复杂（见 [`reflect.Value` 的内部结构](#section-2-1)）。
 
 **3. `Kind` 和 `Type` 有什么区别？**
-`Kind` 是底层种类（26 种），`Type` 是具体类型（无穷）。`type MyInt int` 的 Kind 是 `int` 但 Type 是 `main.MyInt`。写通用代码 switch Kind，判断具体类型比 Type（见 1.3）。
+`Kind` 是底层种类（26 种），`Type` 是具体类型（无穷）。`type MyInt int` 的 Kind 是 `int` 但 Type 是 `main.MyInt`。写通用代码 switch Kind，判断具体类型比 Type（见 [Kind 与 Type 的区别](#section-1-3)）。
 
 **4. 什么是 settable？为什么 `reflect.ValueOf(x).Field(0).Set(...)` 会 panic？**
-`CanSet = CanAddr && 字段导出`。`ValueOf(x)` 拿到的是装箱时产生的**副本**，不可寻址，所以改不了。必须 `reflect.ValueOf(&x).Elem()`（见 1.1、1.4）。
+`CanSet = CanAddr && 字段导出`。`ValueOf(x)` 拿到的是装箱时产生的**副本**，不可寻址，所以改不了。必须 `reflect.ValueOf(&x).Elem()`（见 [反射三定律](#section-1-1)、[可设置性（settability）](#section-1-4)）。
 
 **5. map 的元素和 slice 的元素，哪个可以通过反射修改？**
-slice 元素可以（`sv.Index(0).SetInt(99)`，底层数组固定可寻址）；map 元素不行（map 会重哈希搬移，元素不可寻址），只能 `SetMapIndex` 整体替换（见 1.4）。
+slice 元素可以（`sv.Index(0).SetInt(99)`，底层数组固定可寻址）；map 元素不行（map 会重哈希搬移，元素不可寻址），只能 `SetMapIndex` 整体替换（见 [可设置性（settability）](#section-1-4)）。
 
 **6. 反射能读写未导出字段吗？**
-能读类型和 Kind；`Interface()` 会 panic（`flagRO` 标记）；`String()` 是个后门能拿到 string 值。要真正读写得用 `reflect.NewAt(t, unsafe.Pointer(v.UnsafeAddr()))`——测试和序列化库里偶尔用，生产代码里出现基本是设计问题（见 3.3）。
+能读类型和 Kind；`Interface()` 会 panic（`flagRO` 标记）；`String()` 是个后门能拿到 string 值。要真正读写得用 `reflect.NewAt(t, unsafe.Pointer(v.UnsafeAddr()))`——测试和序列化库里偶尔用，生产代码里出现基本是设计问题（见 [未导出字段](#section-3-3)）。
 
 **7. `reflect.DeepEqual` 有哪些坑？**
-`nil slice ≠ 空 slice`、`NaN != NaN`、函数只有都是 nil 才相等、类型必须完全一致、**会比较未导出字段**（`time.Time`、`sync.Mutex` 容易误判）、有 2 次分配。测试里用 `go-cmp`，简单场景用 `slices.Equal`（见 2.3）。
+`nil slice ≠ 空 slice`、`NaN != NaN`、函数只有都是 nil 才相等、类型必须完全一致、**会比较未导出字段**（`time.Time`、`sync.Mutex` 容易误判）、有 2 次分配。测试里用 `go-cmp`，简单场景用 `slices.Equal`（见 [`DeepEqual` 的规则与坑](#section-2-3)）。
 
 **8. 反射到底慢多少？瓶颈在哪？**
-实测：取字段 4x（3.5ns vs 0.83ns），**`FieldByName` 72x（59.5ns）**，方法调用 ~11x 且 4 次分配，`DeepEqual` 29x。瓶颈是 `FieldByName` 的字符串遍历和 `Call` 的 `[]Value` 构造，不是"反射本身"（见 3.4）。
+实测：取字段 4x（3.5ns vs 0.83ns），**`FieldByName` 72x（59.5ns）**，方法调用 ~11x 且 4 次分配，`DeepEqual` 29x。瓶颈是 `FieldByName` 的字符串遍历和 `Call` 的 `[]Value` 构造，不是"反射本身"（见 [性能：实测数据](#section-3-4)）。
 
 **9. 怎么优化反射代码？**
-① 缓存 Type 级别的解析结果（`encoding/json` 的做法）；② 用 `FieldByIndex([]int)` 代替 `FieldByName`（4 倍差距）；③ 反射一次生成闭包，之后走闭包（sqlx/gorm）；④ 代码生成，彻底消灭反射（easyjson/protobuf）（见 3.5）。
+① 缓存 Type 级别的解析结果（`encoding/json` 的做法）；② 用 `FieldByIndex([]int)` 代替 `FieldByName`（4 倍差距）；③ 反射一次生成闭包，之后走闭包（sqlx/gorm）；④ 代码生成，彻底消灭反射（easyjson/protobuf）（见 [四条优化手法](#section-3-5)）。
 
 **10. `reflect.TypeOf` 和 `reflect.TypeFor[T]` 有什么区别？**
-`TypeOf(v)` 要先把 v 装箱成 `any` 再读 eface；`TypeFor[T]()`（1.22+）编译期就确定，**快 4 倍**，而且对不方便造零值的类型（接口）更方便（见 1.2、3.4）。
+`TypeOf(v)` 要先把 v 装箱成 `any` 再读 eface；`TypeFor[T]()`（1.22+）编译期就确定，**快 4 倍**，而且对不方便造零值的类型（接口）更方便（见 [Type 与 Value](#section-1-2)、[性能：实测数据](#section-3-4)）。
 
 **11. `reflect.ValueOf(接口变量)` 拿到的是接口类型还是动态类型？**
-动态类型——`ValueOf` 会自动穿透接口。要拿接口类型本身得 `reflect.ValueOf(&iface).Elem()`。判断"是否实现某接口"用 `Type.Implements(reflect.TypeFor[I]())`（见 3.6）。
+动态类型——`ValueOf` 会自动穿透接口。要拿接口类型本身得 `reflect.ValueOf(&iface).Elem()`。判断"是否实现某接口"用 `Type.Implements(reflect.TypeFor[I]())`（见 [反射与接口的往返](#section-3-6)）。
 
 **12. `MakeFunc` 是什么？代价多大？**
-用运行时构造的函数值填充任意函数类型，签名 `MakeFunc(typ Type, fn func([]Value) []Value) Value`。实测比直接调用慢 700 倍（470ns vs 0.64ns）且 5 次分配，只适合"调用本身就很贵"的场景，如 RPC 桩（见 2.2）。
+用运行时构造的函数值填充任意函数类型，签名 `MakeFunc(typ Type, fn func([]Value) []Value) Value`。实测比直接调用慢 700 倍（470ns vs 0.64ns）且 5 次分配，只适合"调用本身就很贵"的场景，如 RPC 桩（见 [`MakeFunc`：动态造函数](#section-2-2)）。
 
 **13. 有了泛型，反射还有必要吗？**
-有，但用途变窄了。**类型集编译期已知**就用泛型（类型安全 + 快几倍）；**只有运行时才知道类型**（解析任意 JSON、ORM 映射任意 struct、依赖注入）才用反射。1.18 之后很多老的 `any + 反射` 代码应该换成泛型（见 3.7、generic.md 1.9）。
+有，但用途变窄了。**类型集编译期已知**就用泛型（类型安全 + 快几倍）；**只有运行时才知道类型**（解析任意 JSON、ORM 映射任意 struct、依赖注入）才用反射。1.18 之后很多老的 `any + 反射` 代码应该换成泛型（见 [什么时候不该用反射](#section-3-7)、[什么时候用泛型，什么时候用接口](generic.md#section-1-9)）。
 
 **14. 1.26 的迭代器反射 API 有什么用？**
-`Type.Fields()`/`Methods()`/`Ins()`/`Outs()`、`Value.Fields()`/`Methods()` 把 `for i := range t.NumField()` 的样板换成 `for f := range t.Fields()`。注意 1.23 的 `Value.Seq()` 语义对齐 `range`——slice 上单变量给的是**下标**不是元素（见 1.6）。
+`Type.Fields()`/`Methods()`/`Ins()`/`Outs()`、`Value.Fields()`/`Methods()` 把 `for i := range t.NumField()` 的样板换成 `for f := range t.Fields()`。注意 1.23 的 `Value.Seq()` 语义对齐 `range`——slice 上单变量给的是**下标**不是元素（见 [1.26 的迭代器 API](#section-1-6)）。

@@ -636,26 +636,20 @@ func trapTimeAfter() {
 
 	ch := make(chan int)
 
-	// 错误示范（这里只跑 3 轮）：每轮都新建一个 timer
+	// 对比写法（这里只跑 3 轮）：每轮都新建一个 timer
 	for range 3 {
 		select {
 		case <-ch:
 		case <-time.After(time.Millisecond):
 		}
 	}
-	fmt.Println("time.After: 每轮新建 timer，到期前不会被回收")
+	fmt.Println("time.After: 每轮新建 timer；Go 1.23+ 默认语义允许回收无引用的 timer，但仍有分配成本")
 
 	// 正确写法：复用一个 Timer
 	t := time.NewTimer(time.Millisecond)
 	defer t.Stop()
 	for range 3 {
-		if !t.Stop() { // 复用前先停掉并排空
-			select {
-			case <-t.C:
-			default:
-			}
-		}
-		t.Reset(time.Millisecond)
+		t.Reset(time.Millisecond) // Go 1.23+ 默认语义，无需 Stop + drain
 		select {
 		case <-ch:
 		case <-t.C:

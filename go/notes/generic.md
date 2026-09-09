@@ -1,15 +1,32 @@
 # 泛型
 
+> 定位：泛型语言规则与 shape/字典实现。
+> 前置知识：[Slice](slice.md)、[Map](map.md)、[方法](method.md)、[接口](interface.md)。
+> 配套示例：[generic/main.go](generic/main.go)（`go run ./generic`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用与语言规则](#topic-1) → [常见陷阱](#topic-3)；深入实现或进阶用法时读 [底层原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用与语言规则](#topic-1)
+- [底层原理](#topic-2)
+- [常见陷阱](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3`。泛型自 Go 1.18 引入，之后语言层面有几次重要演进，本文按 1.26 的行为书写，涉及版本差异处会单独标注：
 > - **1.18**：类型参数、类型集约束、`any`/`comparable` 预声明标识符。
-> - **1.20**：放宽 `comparable` 的约束满足规则（普通可比较类型/接口也能"满足"`comparable`，见 1.4）。
+> - **1.20**：放宽 `comparable` 的约束满足规则（普通可比较类型/接口也能"满足"`comparable`，见 [预声明约束：`any` 与 `comparable`](#section-1-4)）。
 > - **1.21**：类型推断大幅增强；`cmp`、`slices`、`maps` 进入标准库。
 > - **1.24**：支持**泛型类型别名**（`type A[T any] = B[T]`）。
-> - **1.25**：规范中删除了"核心类型（core type）"这个概念，改为对 `range`/`make`/索引/收发等操作**逐条**定义合法性规则（见 2.5）。
+> - **1.25**：规范中删除了"核心类型（core type）"这个概念，改为对 `range`/`make`/索引/收发等操作**逐条**定义合法性规则（见 [操作合法性：从"核心类型"到逐条规则](#section-2-5)）。
 >
 > 实现细节以 `cmd/compile/internal/noder/{reader.go,writer.go}`、`cmd/compile/internal/typecheck/subr.go` 该版本源码为准。
 
-## 一、基础使用
+<a id="topic-1"></a>
+
+## 一、基础使用与语言规则
+
+<a id="section-1-1"></a>
 
 ### 1.1 类型参数与实例化
 
@@ -28,8 +45,10 @@ f := Max[int]    // 实例化后的函数是一个普通函数值
 ```
 
 - `[T C]` 写在函数名之后、参数列表之前；多个类型参数用逗号分隔，共享约束时可写 `[K, V any]`。
-- **泛型函数/类型必须先"实例化"成具体类型才能使用**，`f := Max` 这种写法是编译错误（见 3.9）。
-- 实例化是**编译期**行为：`Max[int]` 和 `Max[float64]` 在编译后是两个不同的东西（具体共享到什么程度见 2.2）。
+- **泛型函数/类型必须先"实例化"成具体类型才能使用**，`f := Max` 这种写法是编译错误（见 [未实例化的泛型函数不能当值用](#section-3-9)）。
+- 实例化是**编译期**行为：`Max[int]` 和 `Max[float64]` 在编译后是两个不同的东西（具体共享到什么程度见 [shape 类型：哪些实例共享同一份代码](#section-2-2)）。
+
+<a id="section-1-2"></a>
 
 ### 1.2 约束就是接口：从"方法集"到"类型集"
 
@@ -46,7 +65,7 @@ type Stringish interface {
 }
 ```
 
-- **约束的作用是双向的**：既限制调用方能传哪些类型实参，也决定了泛型函数体内**能对该类型做哪些操作**——只有类型集里所有类型都支持的操作才允许写（见 2.5）。
+- **约束的作用是双向的**：既限制调用方能传哪些类型实参，也决定了泛型函数体内**能对该类型做哪些操作**——只有类型集里所有类型都支持的操作才允许写（见 [操作合法性：从"核心类型"到逐条规则](#section-2-5)）。
 - 只含方法的接口叫**基本接口（basic interface）**，它既能当约束、也能当普通类型；**一旦接口里出现类型项，就只能当约束**：
 
 ```go
@@ -57,6 +76,8 @@ var x Num // 编译错误：
 ```
 
 - 约束只有一个类型项时可以省略 `interface{}` 外壳：`[T int]`、`[T ~[]byte]` 都合法。
+
+<a id="section-1-3"></a>
 
 ### 1.3 `~T`：底层类型近似
 
@@ -81,6 +102,8 @@ type C2 interface{ ~error } // invalid use of ~ (error is an interface)
 ```
 
 即 `~` 后面必须是"自己就是自己底层类型"的类型，且不能是接口。
+
+<a id="section-1-4"></a>
 
 ### 1.4 预声明约束：`any` 与 `comparable`
 
@@ -111,7 +134,7 @@ s[[]int{1}] = struct{}{} // 运行时 panic: hash of unhashable type []int
 | `struct{ f any }` | `comparable` | 满足 |
 | `any` | `interface{ comparable; m() }` | 不满足（`any` 没实现 `m()`） |
 
-**结论**：`comparable` 只保证编译期能写 `==`，**不保证运行时不 panic**（见 3.6）。
+**结论**：`comparable` 只保证编译期能写 `==`，**不保证运行时不 panic**（见 [`comparable` 不保证运行时不 panic](#section-3-6)）。
 
 有序比较用标准库的 `cmp.Ordered`（Go 1.21+），不要自己重复造：
 
@@ -120,6 +143,8 @@ import "cmp"
 
 func Min[T cmp.Ordered](a, b T) T { if a < b { return a }; return b }
 ```
+
+<a id="section-1-5"></a>
 
 ### 1.5 泛型类型及其方法
 
@@ -151,7 +176,7 @@ func (l *List[T]) Map[U any](f func(T) U) []U { ... }
 // syntax error: method must have no type parameters
 ```
 
-需要额外类型参数时只能写成顶层函数：`func Map[T, U any](l *List[T], f func(T) U) []U`（见 3.3）。
+需要额外类型参数时只能写成顶层函数：`func Map[T, U any](l *List[T], f func(T) U) []U`（见 [方法不能有类型参数](#section-3-3)）。
 
 - **泛型类型别名**（Go 1.24+）：
 
@@ -162,9 +187,11 @@ type StrPair[V any] = Pair[string, V]   // 1.24 之前这行编译不过
 fmt.Println(StrPair[int]{"a", 1}) // {a 1}
 ```
 
+<a id="section-1-6"></a>
+
 ### 1.6 类型推断
 
-能推断的主要是这几类信息：**函数实参的类型** → 类型参数；已确定的类型参数 → 约束里出现的其他类型参数（约束类型推断，见 1.7）。
+能推断的主要是这几类信息：**函数实参的类型** → 类型参数；已确定的类型参数 → 约束里出现的其他类型参数（约束类型推断，见 [约束类型推断：`S ~[]E` 惯用法](#section-1-7)）。
 
 ```go
 Max(1, 2)              // 由实参推出 T = int
@@ -184,6 +211,8 @@ var x int = Zero()     // 编译错误：
 // in call to Zero, cannot infer T (declared at ...)
 var y int = Zero[int]() // 只能显式实例化
 ```
+
+<a id="section-1-7"></a>
 
 ### 1.7 约束类型推断：`S ~[]E` 惯用法
 
@@ -207,6 +236,8 @@ var b fmt.Stringer = ScaleBad(n, 2)  // 编译错误：
 
 推断过程：由实参 `n` 得到 `S = Nums`；再由约束 `S ~[]E` 反推 `E = int`——后一步就是"约束类型推断"。
 
+<a id="section-1-8"></a>
+
 ### 1.8 标准库里的泛型
 
 | 包 | 典型 API |
@@ -219,13 +250,43 @@ var b fmt.Stringer = ScaleBad(n, 2)  // 编译错误：
 
 注意 `maps.Keys` 返回的是**迭代器** `iter.Seq[K]` 而不是切片，要切片用 `slices.Collect(maps.Keys(m))`（见 iter.md）。
 
+<a id="section-1-9"></a>
+
 ### 1.9 什么时候用泛型，什么时候用接口
 
 - **用泛型**：同一段算法逻辑要作用在多个具体类型上，且这些类型**编译期已知**——容器、算法、工具函数（`Map`/`Filter`/`Reduce`）、避免 `any` 装箱的热路径。
 - **用接口**：要表达的是**行为契约 / 依赖倒置**，实现方在运行时才确定、可插拔、可 mock——`io.Reader`、存储层抽象、插件式架构。
-- **判据**：如果你写完发现类型参数只在参数和返回值上出现、函数体内只调它的方法而不做任何和具体类型有关的操作，那这里其实一个接口就够了，用泛型反而多了一层字典开销（见 2.6、3.11）。
+- **判据**：如果你写完发现类型参数只在参数和返回值上出现、函数体内只调它的方法而不做任何和具体类型有关的操作，那这里其实一个接口就够了，用泛型反而多了一层字典开销（见 [性能实测：泛型 ≠ 更快](#section-2-6)、[把泛型当性能银弹](#section-3-11)）。
+
+<a id="section-2-5"></a>
+
+### 1.10 操作合法性：从"核心类型"到逐条规则
+
+Go 1.25 之前，规范用"核心类型（core type）"统一描述"什么操作能作用在类型参数上"；1.25 起该概念被删除（`doc/go_spec.html` 里已搜不到 "core type"），改为对 `range`、`make`、索引、`len`、通道收发等**逐个操作**给出规则。实际效果和以前基本一致：**类型集里所有类型的底层类型必须相同**（通道另有方向上的宽松规则）。
+
+```go
+// ✗ 底层类型不同：range / make 都报错
+func Count[T ~[]byte | ~string](v T) int { for range v { } ; return 0 }
+// cannot range over v (variable of type T constrained by ~[]byte | ~string):
+//   []byte and string have different underlying types
+
+func Make[T ~[]int | ~map[string]int](n int) T { return make(T, n) }
+// invalid argument: cannot make T: []int and map[string]int have different underlying types
+
+// ✓ 底层类型相同的多个具名类型
+type IntSlice []int
+type Nums []int
+func Sum[S IntSlice | Nums](s S) int { total := 0; for _, v := range s { total += v }; return total }
+
+// ✓ 通道的方向例外：元素类型相同即可
+func Recv[T ~chan int | ~<-chan int](c T) int { return <-c }
+```
+
+<a id="topic-2"></a>
 
 ## 二、底层原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 三条实现路线与 Go 的选择
 
@@ -236,6 +297,8 @@ var b fmt.Stringer = ScaleBad(n, 2)  // 编译错误：
 | **GC Shape Stenciling + Dictionaries** | **Go 1.18+** | 折中：按"形状"分组生成代码 | 形状内共享代码需要额外查字典 |
 
 Go 的做法：把类型实参按 **GC shape（GC 形状）** 分组，**每组形状生成一份机器码**；每个具体实例化再额外生成一份只读的**字典（dictionary）**，把这份代码里"跟具体类型有关"的东西（类型描述符、itab、方法地址、子字典）作为数据传进去。
+
+<a id="section-2-2"></a>
 
 ### 2.2 shape 类型：哪些实例共享同一份代码
 
@@ -284,6 +347,8 @@ main.Id[go.shape.map[int]int]
 
 补充：为避免超长类型名（protobuf 大结构体）撑爆符号表，`shapify` 会在名字过长时改用 hash（`-d=maxshapelen`）。
 
+<a id="section-2-3"></a>
+
 ### 2.3 字典里装了什么
 
 字典的内容在 `objDictIdx()` 里按顺序写出，共四类（`readerDict`）：
@@ -317,6 +382,8 @@ TypeOf(MyInt(1)) // main.MyInt / main.MyInt   （和 TypeOf(int(1)) 共用同一
 TypeOf(int(1))   // int / int
 ```
 
+<a id="section-2-4"></a>
+
 ### 2.4 一次泛型方法调用的汇编
 
 字典作为**隐藏的第一个参数**传入（amd64 regabi 下放在 `AX`，真实参数顺延到 `BX`…）：
@@ -339,29 +406,9 @@ CALL  CX           ; 间接调用
 ./a.go:11:6: cannot inline sumGeneric[main.Cnt]: function too complex: cost 86 exceeds budget 80
 ```
 
-### 2.5 操作合法性：从"核心类型"到逐条规则
+<a id="section-2-6"></a>
 
-Go 1.25 之前，规范用"核心类型（core type）"统一描述"什么操作能作用在类型参数上"；1.25 起该概念被删除（`doc/go_spec.html` 里已搜不到 "core type"），改为对 `range`、`make`、索引、`len`、通道收发等**逐个操作**给出规则。实际效果和以前基本一致：**类型集里所有类型的底层类型必须相同**（通道另有方向上的宽松规则）。
-
-```go
-// ✗ 底层类型不同：range / make 都报错
-func Count[T ~[]byte | ~string](v T) int { for range v { } ; return 0 }
-// cannot range over v (variable of type T constrained by ~[]byte | ~string):
-//   []byte and string have different underlying types
-
-func Make[T ~[]int | ~map[string]int](n int) T { return make(T, n) }
-// invalid argument: cannot make T: []int and map[string]int have different underlying types
-
-// ✓ 底层类型相同的多个具名类型
-type IntSlice []int
-type Nums []int
-func Sum[S IntSlice | Nums](s S) int { total := 0; for _, v := range s { total += v }; return total }
-
-// ✓ 通道的方向例外：元素类型相同即可
-func Recv[T ~chan int | ~<-chan int](c T) int { return <-c }
-```
-
-### 2.6 性能实测：泛型 ≠ 更快
+### 2.5 性能实测：泛型 ≠ 更快
 
 环境：`go1.26.3 darwin/amd64`，Intel i5-1038NG7。
 
@@ -373,7 +420,7 @@ BenchmarkGeneric-8      765192    1589   ns/op    0 B/op   0 allocs/op   # 泛�
 BenchmarkIface-8        693045    1769   ns/op    0 B/op   0 allocs/op   # 接口，走 itab 动态派发
 ```
 
-泛型比具体类型慢 **3.4x**，和接口基本持平——因为两者都是间接调用且都无法内联（见 2.4）。
+泛型比具体类型慢 **3.4x**，和接口基本持平——因为两者都是间接调用且都无法内联（见 [一次泛型方法调用的汇编](#section-2-4)）。
 
 **场景二：避免 `any` 装箱（128 字节结构体逃逸）**
 
@@ -382,11 +429,15 @@ BenchmarkBoxAny-8         33932595    34.98 ns/op    128 B/op    1 allocs/op
 BenchmarkNoBoxGeneric-8  276205976     4.34 ns/op      0 B/op    0 allocs/op
 ```
 
-泛型快 **8x**，且零分配——因为值以原本的形状传递，不需要装箱到接口里（interface.md 2.3）。
+泛型快 **8x**，且零分配——因为值以原本的形状传递，不需要装箱到接口里（[接口赋值时的"装箱"与内存分配](interface.md#section-2-3)）。
 
 **结论**：泛型的性能收益来自**消除装箱**，不来自"消除动态派发"。约束里只有方法的泛型，性能和接口一样；约束里有类型项（可以直接做运算/索引）的泛型，才真正省掉了装箱和断言。
 
+<a id="topic-3"></a>
+
 ## 三、常见陷阱
+
+<a id="section-3-1"></a>
 
 ### 3.1 含类型项的接口当普通类型用
 
@@ -400,6 +451,8 @@ func g[T Num](n T) {}  // ✓ 只能当约束
 
 **原因**：类型集里的类型没有共同的方法表，运行时无法为它构造 itab，这种接口纯粹是编译期概念。
 
+<a id="section-3-2"></a>
+
 ### 3.2 忘了 `~`，具名类型不满足约束
 
 ```go
@@ -411,6 +464,8 @@ Sum([]Celsius{1, 2}) // ✗ Celsius does not satisfy float64 (possibly missing ~
 ```
 
 **正确写法**：约束一律写 `~int | ~float64`，或者直接用 `cmp.Ordered`（它内部就是 `~` 形式）。
+
+<a id="section-3-3"></a>
 
 ### 3.3 方法不能有类型参数
 
@@ -428,6 +483,8 @@ func Map[T, U any](l *List[T], f func(T) U) []U { ... }
 ```
 
 这也是为什么标准库是 `slices.Map` 风格而不是 `s.Map()` 风格。
+
+<a id="section-3-4"></a>
 
 ### 3.4 不能直接对类型参数做类型断言 / type switch
 
@@ -451,6 +508,8 @@ func F[T any](v T) {
 
 但要警惕：一旦写出 `any(v).(type)`，说明你在为不同类型写不同逻辑，**这时候泛型往往是错的抽象**，应该考虑接口 + 多态，或者干脆写多个函数。
 
+<a id="section-3-5"></a>
+
 ### 3.5 `v == nil` 非法；零值判断需要 `comparable`
 
 ```go
@@ -467,6 +526,8 @@ func IsZeroAny[T any](v T) bool     { return reflect.ValueOf(&v).Elem().IsZero()
 
 想表达"可能为 nil"就别用 `T any`，用 `*T` 或 `T ~*E | ~[]E`（能表达就表达在类型里）。
 
+<a id="section-3-6"></a>
+
 ### 3.6 `comparable` 不保证运行时不 panic
 
 ```go
@@ -475,7 +536,9 @@ s := Set[any]{}
 s[[]int{1}] = struct{}{} // panic: runtime error: hash of unhashable type []int
 ```
 
-Go 1.20 起 `any` 能"满足"`comparable`（见 1.4）。**如果你的容器绝对不能在运行时崩，别把 key 类型参数暴露成 `comparable` 就完事**，要么在文档里写清楚，要么约束成具体的类型集（`~string | ~int`）。
+Go 1.20 起 `any` 能"满足"`comparable`（见 [预声明约束：`any` 与 `comparable`](#section-1-4)）。**如果你的容器绝对不能在运行时崩，别把 key 类型参数暴露成 `comparable` 就完事**，要么在文档里写清楚，要么约束成具体的类型集（`~string | ~int`）。
+
+<a id="section-3-7"></a>
 
 ### 3.7 返回 `[]E` 丢失具名类型
 
@@ -486,6 +549,8 @@ func Filter[S ~[]E, E any](s S, f func(E) bool) S // ✓ 传 Nums 进去，出�
 
 具名切片类型上挂的方法（`String()`、`Len()`…）会在第一种写法里全部丢掉，调用方拿到的值不再实现原来的接口。**凡是"输入什么切片类型、输出就该是什么切片类型"的函数，都用 `S ~[]E` 双参数形式**——这就是 `slices` 包全员这么写的原因。
 
+<a id="section-3-8"></a>
+
 ### 3.8 不能从返回值推断类型参数
 
 ```go
@@ -494,6 +559,8 @@ var m = Make[map[string]int]()     // ✓
 ```
 
 **推论**：设计泛型 API 时，尽量让类型参数出现在**参数**里，否则调用方每次都得手写实例化，可读性很差。工厂函数可以改成"传一个零值/指针进去"：`func New[T any](proto T) *Box[T]`。
+
+<a id="section-3-9"></a>
 
 ### 3.9 未实例化的泛型函数不能当值用
 
@@ -505,6 +572,8 @@ var h func(int, int) int = Max[int] // ✓
 
 同理，泛型函数不能直接作为 `func` 类型的参数传递，必须先实例化。
 
+<a id="section-3-10"></a>
+
 ### 3.10 实例化循环（instantiation cycle）
 
 ```go
@@ -513,17 +582,23 @@ func F[T any](x T) { F([]T{x}) } // ✗ instantiation cycle: T instantiated as [
 
 每次递归调用都产生一个新类型（`int` → `[]int` → `[][]int` …），编译期无法收敛。编译器会直接报错而不是无限编译下去。**递归泛型函数的类型参数必须保持不变**。
 
+<a id="section-3-11"></a>
+
 ### 3.11 把泛型当性能银弹
 
-见 2.6 的实测：约束里只有方法时，泛型的方法调用走字典间接调用，和接口一样快（慢），还额外多了一次字典寻址；能内联的具体类型版本比它快 3 倍以上。
+见 [性能实测：泛型 ≠ 更快](#section-2-6) 的实测：约束里只有方法时，泛型的方法调用走字典间接调用，和接口一样快（慢），还额外多了一次字典寻址；能内联的具体类型版本比它快 3 倍以上。
 
 **什么时候泛型真的更快**：热路径上原本用 `any` 装箱大结构体（省下堆分配）、原本用 `interface{}` + 类型断言做数值运算（省下断言和装箱）。**什么时候不会更快**：原本就用小接口做方法派发的地方。
+
+<a id="section-3-12"></a>
 
 ### 3.12 代码膨胀与编译变慢
 
 shape 只按**底层类型**合并，所以 `Sum[int]`、`Sum[int64]`、`Sum[float64]`、`Sum[uint32]`… 每种底层类型都是一份独立机器码，加上每个实例一份字典。约束写得越宽、实例化的类型越多，二进制越大、编译越慢。
 
 **缓解**：热点之外优先接口；类型参数数量控制在 1–2 个；不要为"可能将来会用"的类型提前放宽约束。
+
+<a id="section-3-13"></a>
 
 ### 3.13 union 里不能放带方法的接口
 
@@ -543,6 +618,8 @@ type Good interface {
 }
 ```
 
+<a id="section-3-14"></a>
+
 ### 3.14 不同底层类型的 union 上什么操作都做不了
 
 ```go
@@ -550,7 +627,9 @@ func Len[T ~[]byte | ~string](v T) int { return len(v) } // len 恰好合法
 func Cnt[T ~[]byte | ~string](v T) int { for range v {}; return 0 } // ✗ range 不行
 ```
 
-写出一个"看起来很通用"的 union 之后，会发现函数体里几乎什么都不能写（见 2.5）。**约束不是越宽越好，宽到无法操作就没意义了**——这种情况正确的解法通常是重载成两个函数，或者接受一个转换函数。
+写出一个"看起来很通用"的 union 之后，会发现函数体里几乎什么都不能写（见 [操作合法性：从"核心类型"到逐条规则](#section-2-5)）。**约束不是越宽越好，宽到无法操作就没意义了**——这种情况正确的解法通常是重载成两个函数，或者接受一个转换函数。
+
+<a id="section-3-15"></a>
 
 ### 3.15 用泛型模拟函数重载
 
@@ -563,58 +642,60 @@ func Process[T int | string | []byte](v T) {
 
 类型参数只在签名上"统一"，函数体里立刻分叉，等于用泛型伪装重载：既没有类型安全收益，也没有性能收益，还让调用方看不清函数到底干什么。**逻辑不同就写不同的函数**（`ProcessInt`、`ProcessString`），这在 Go 里不是缺点。
 
+<a id="topic-4"></a>
+
 ## 四、常见面试题
 
 **1. Go 泛型是怎么实现的？和 C++ 模板、Java 泛型有什么区别？**
-Go 走的是折中路线 **GC Shape Stenciling + Dictionaries**：按类型实参的 GC 形状（基本上就是底层类型）分组，每组生成一份机器码；每个具体实例化再生成一份只读字典，把类型描述符、itab、方法地址、子字典作为隐藏参数传进去。C++ 是完全单态化（零运行时开销但代码膨胀），Java 是类型擦除（一份代码但全程装箱），Go 介于两者之间（见 2.1）。
+Go 走的是折中路线 **GC Shape Stenciling + Dictionaries**：按类型实参的 GC 形状（基本上就是底层类型）分组，每组生成一份机器码；每个具体实例化再生成一份只读字典，把类型描述符、itab、方法地址、子字典作为隐藏参数传进去。C++ 是完全单态化（零运行时开销但代码膨胀），Java 是类型擦除（一份代码但全程装箱），Go 介于两者之间（见 [三条实现路线与 Go 的选择](#section-2-1)）。
 
 **2. `Sum[int]` 和 `Sum[MyInt]`（`type MyInt int`）会生成几份代码？**
-机器码只有一份 `main.Sum[go.shape.int]`（因为底层类型都是 `int`），但字典有两份 `..dict.Sum[int]` 和 `..dict.Sum[main.MyInt]`。而 `Sum[int64]` 底层类型不同，会另生成一份代码（见 2.2）。
+机器码只有一份 `main.Sum[go.shape.int]`（因为底层类型都是 `int`），但字典有两份 `..dict.Sum[int]` 和 `..dict.Sum[main.MyInt]`。而 `Sum[int64]` 底层类型不同，会另生成一份代码（见 [shape 类型：哪些实例共享同一份代码](#section-2-2)）。
 
 **3. 字典（dictionary）里装了什么？运行时会变吗？**
-四类内容：类型参数上方法的函数地址、内层泛型调用要用的子字典、派生类型的 `*runtime._type`、需要的 itab。它是 `SRODATA dupok` 只读数据，编译期就完全确定，运行时不修改也不需要 GC 扫描（见 2.3）。
+四类内容：类型参数上方法的函数地址、内层泛型调用要用的子字典、派生类型的 `*runtime._type`、需要的 itab。它是 `SRODATA dupok` 只读数据，编译期就完全确定，运行时不修改也不需要 GC 扫描（见 [字典里装了什么](#section-2-3)）。
 
 **4. 泛型函数里 `reflect.TypeOf(v)` 拿到的是 shape 类型还是真实类型？**
-真实类型。虽然 `TypeOf[int]` 和 `TypeOf[MyInt]` 共用一份代码，但 rtype 是从各自的字典里取的，所以分别返回 `int` 和 `main.MyInt`（见 2.3）。
+真实类型。虽然 `TypeOf[int]` 和 `TypeOf[MyInt]` 共用一份代码，但 rtype 是从各自的字典里取的，所以分别返回 `int` 和 `main.MyInt`（见 [字典里装了什么](#section-2-3)）。
 
 **5. 泛型比接口快吗？**
-看约束。约束只有方法时**不快**：类型参数上的方法调用编译成从字典取地址再 `CALL`，和接口的 itab 派发同量级，都无法内联，实测比具体类型慢 3 倍以上。约束含类型项、能直接做运算时**明显快**：省掉了装箱和类型断言，实测传 128 字节结构体比 `any` 快 8 倍且零分配（见 2.6）。
+看约束。约束只有方法时**不快**：类型参数上的方法调用编译成从字典取地址再 `CALL`，和接口的 itab 派发同量级，都无法内联，实测比具体类型慢 3 倍以上。约束含类型项、能直接做运算时**明显快**：省掉了装箱和类型断言，实测传 128 字节结构体比 `any` 快 8 倍且零分配（见 [性能实测：泛型 ≠ 更快](#section-2-6)）。
 
 **6. 为什么方法不能有类型参数？**
-带类型参数的方法等价于无穷多个签名，编译器无法为它建 itab、也无法判断一个类型是否实现了某接口。需要额外类型参数时提为顶层函数（见 1.5、3.3）。
+带类型参数的方法等价于无穷多个签名，编译器无法为它建 itab、也无法判断一个类型是否实现了某接口。需要额外类型参数时提为顶层函数（见 [泛型类型及其方法](#section-1-5)、[方法不能有类型参数](#section-3-3)）。
 
 **7. `~int` 和 `int` 作为约束有什么区别？`~` 后面能写什么？**
-`int` 只接受 `int` 本身，`~int` 接受所有底层类型为 `int` 的类型（含 `type MyInt int`）。`~T` 中的 `T` 必须"自己就是自己的底层类型"，且不能是接口，否则报 `invalid use of ~`（见 1.3）。
+`int` 只接受 `int` 本身，`~int` 接受所有底层类型为 `int` 的类型（含 `type MyInt int`）。`~T` 中的 `T` 必须"自己就是自己的底层类型"，且不能是接口，否则报 `invalid use of ~`（见 [`~T`：底层类型近似](#section-1-3)）。
 
 **8. 约束接口和普通接口有什么区别？含类型项的接口能声明变量吗？**
-Go 1.18 把接口推广为"类型集"。只有方法的叫基本接口，既能当约束也能当类型；一旦出现类型项（`~int`、union），就只能当约束，声明变量会报 `cannot use type X outside a type constraint`——因为这类接口没有统一的方法表，运行时无法表示（见 1.2、3.1）。
+Go 1.18 把接口推广为"类型集"。只有方法的叫基本接口，既能当约束也能当类型；一旦出现类型项（`~int`、union），就只能当约束，声明变量会报 `cannot use type X outside a type constraint`——因为这类接口没有统一的方法表，运行时无法表示（见 [约束就是接口：从"方法集"到"类型集"](#section-1-2)、[含类型项的接口当普通类型用](#section-3-1)）。
 
 **9. `comparable` 能保证运行时比较不 panic 吗？**
-不能。Go 1.20 起区分了"满足（satisfies）"和"实现（implements）"：`any`、`struct{ f any }` 这类"可比较但不严格可比较"的类型也能满足 `comparable`，把切片装进去再比较/做 map key 会 panic `hash of unhashable type`（见 1.4、3.6）。
+不能。Go 1.20 起区分了"满足（satisfies）"和"实现（implements）"：`any`、`struct{ f any }` 这类"可比较但不严格可比较"的类型也能满足 `comparable`，把切片装进去再比较/做 map key 会 panic `hash of unhashable type`（见 [预声明约束：`any` 与 `comparable`](#section-1-4)、[`comparable` 不保证运行时不 panic](#section-3-6)）。
 
 **10. 泛型的类型推断能做到什么程度？不能做什么？**
-能从函数实参推类型参数，能通过约束（如 `S ~[]E`）从已知类型参数推未知类型参数；**不能从返回值或赋值目标反推**，报 `cannot infer T`。无类型常量按默认类型参与推断，但和已定型的实参混用时会失败（见 1.6、3.8）。
+能从函数实参推类型参数，能通过约束（如 `S ~[]E`）从已知类型参数推未知类型参数；**不能从返回值或赋值目标反推**，报 `cannot infer T`。无类型常量按默认类型参与推断，但和已定型的实参混用时会失败（见 [类型推断](#section-1-6)、[不能从返回值推断类型参数](#section-3-8)）。
 
 **11. `func Filter[E any](s []E) []E` 和 `func Filter[S ~[]E, E any](s S) S` 有什么区别？**
-前者返回值退化成 `[]E`，具名切片类型上挂的方法全部丢失，调用方拿到的值不再实现原接口；后者靠约束类型推断把 `S` 推成调用方传入的具名类型，原样返回。标准库 `slices` 全部采用后者（见 1.7、3.7）。
+前者返回值退化成 `[]E`，具名切片类型上挂的方法全部丢失，调用方拿到的值不再实现原接口；后者靠约束类型推断把 `S` 推成调用方传入的具名类型，原样返回。标准库 `slices` 全部采用后者（见 [约束类型推断：`S ~[]E` 惯用法](#section-1-7)、[返回 `[]E` 丢失具名类型](#section-3-7)）。
 
 **12. 能对类型参数做 type switch 吗？**
-不能直接做，报 `cannot use type switch on type parameter value`。要先 `any(v)` 转成接口。但如果你需要这么做，通常说明泛型不是这里正确的抽象（见 3.4）。
+不能直接做，报 `cannot use type switch on type parameter value`。要先 `any(v)` 转成接口。但如果你需要这么做，通常说明泛型不是这里正确的抽象（见 [不能直接对类型参数做类型断言 / type switch](#section-3-4)）。
 
 **13. `union` 里能放 `fmt.Stringer` 吗？方法和类型项怎么组合？**
-不能，报 `cannot use fmt.Stringer in union (contains methods)`。方法和类型项要用**交集**表达：接口里分行写 `~int` 和 `fmt.Stringer`，含义是"底层类型是 int 且实现了 Stringer"（见 3.13）。
+不能，报 `cannot use fmt.Stringer in union (contains methods)`。方法和类型项要用**交集**表达：接口里分行写 `~int` 和 `fmt.Stringer`，含义是"底层类型是 int 且实现了 Stringer"（见 [union 里不能放带方法的接口](#section-3-13)）。
 
 **14. 什么是"核心类型（core type）"？现在还有吗？**
-Go 1.18–1.24 的规范用它来判断能不能对类型参数做 `range`/`make`/索引等操作。Go 1.25 起该概念被删除，改为逐操作定义规则，实际效果仍是"类型集里所有类型的底层类型必须相同"，通道的方向另有宽松规则（见 2.5）。
+Go 1.18–1.24 的规范用它来判断能不能对类型参数做 `range`/`make`/索引等操作。Go 1.25 起该概念被删除，改为逐操作定义规则，实际效果仍是"类型集里所有类型的底层类型必须相同"，通道的方向另有宽松规则（见 [操作合法性：从"核心类型"到逐条规则](#section-2-5)）。
 
 **15. 什么时候该用泛型，什么时候该用接口？**
-编译期已知的多个具体类型上跑同一段算法（容器、算法、避免装箱的热路径）→ 泛型；要表达运行时可替换的行为契约、依赖倒置、可 mock → 接口。如果类型参数只用来调方法、函数体里没有任何和具体类型相关的操作，那用接口就够了，泛型只是多了一层字典（见 1.9、2.6）。
+编译期已知的多个具体类型上跑同一段算法（容器、算法、避免装箱的热路径）→ 泛型；要表达运行时可替换的行为契约、依赖倒置、可 mock → 接口。如果类型参数只用来调方法、函数体里没有任何和具体类型相关的操作，那用接口就够了，泛型只是多了一层字典（见 [什么时候用泛型，什么时候用接口](#section-1-9)、[性能实测：泛型 ≠ 更快](#section-2-6)）。
 
 **16. 泛型对二进制体积和编译速度有什么影响？怎么控制？**
-每种底层类型一份机器码 + 每个实例一份字典，约束越宽、实例化越多，膨胀越明显。控制手段：热点之外优先接口、类型参数控制在 1–2 个、不要提前放宽约束（见 3.12）。
+每种底层类型一份机器码 + 每个实例一份字典，约束越宽、实例化越多，膨胀越明显。控制手段：热点之外优先接口、类型参数控制在 1–2 个、不要提前放宽约束（见 [代码膨胀与编译变慢](#section-3-12)）。
 
 **17. `g := Max` 为什么编译不过？**
-泛型函数必须实例化后才是一个值。`Max` 只是模板，`Max[int]` 才有确定的签名和字典，才能赋给变量或作为参数传递（见 3.9）。
+泛型函数必须实例化后才是一个值。`Max` 只是模板，`Max[int]` 才有确定的签名和字典，才能赋给变量或作为参数传递（见 [未实例化的泛型函数不能当值用](#section-3-9)）。
 
 **18. 什么是实例化循环？**
-递归泛型调用中类型参数不断变化（`T` → `[]T` → `[][]T`…），编译期无法收敛，编译器直接报 `instantiation cycle`。递归泛型函数的类型参数必须保持不变（见 3.10）。
+递归泛型调用中类型参数不断变化（`T` → `[]T` → `[][]T`…），编译期无法收敛，编译器直接报 `instantiation cycle`。递归泛型函数的类型参数必须保持不变（见 [实例化循环（instantiation cycle）](#section-3-10)）。

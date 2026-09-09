@@ -641,7 +641,7 @@ func observability() {
 	fmt.Println()
 	for _, row := range [][2]string{
 		{"/debug/pprof/goroutine?debug=2", "找 [IO wait] 和 internal/poll.(*pollDesc).wait 栈帧"},
-		{"runtime/trace 的 Network blocking profile", "G 在网络上总共等了多久（profile.md 5.2）"},
+		{"runtime/trace 的 Network blocking profile", "G 在网络上总共等了多久（profile.md#section-5-2）"},
 		{"trace 里的 GoUnblock(reason=network)", "netpoll 唤醒事件，能看到 poll -> 运行的延迟"},
 		{"pprof.Lookup(\"threadcreate\").Count()", "线程数；远超 GOMAXPROCS 说明有非 pollable 的阻塞"},
 		{"GODEBUG=schedtrace=1000", "idleprocs 常年满 + runqueue 空 = 在等 IO，不是 CPU 瓶颈"},

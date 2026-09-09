@@ -1,5 +1,19 @@
 # time
 
+> 定位：时间表示、定时器与生命周期。
+> 前置知识：[Channel](chan.md)。
+> 配套示例：[tm/main.go](tm/main.go)（`go run ./tm`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础](#topic-1) → [Timer / Ticker](#topic-2) → [常见陷阱](#topic-4)；深入实现或进阶用法时读 [runtime 侧的实现](#topic-3)。
+
+**篇内导航**
+
+- [基础](#topic-1)
+- [Timer / Ticker](#topic-2)
+- [runtime 侧的实现](#topic-3)
+- [常见陷阱](#topic-4)
+- [常见面试题](#topic-5)
+
 > 环境：`go version go1.26.3 darwin/amd64`。源码：`time/{time,sleep,tick,format}.go`、`runtime/time.go`。配套代码：`notes/tm/`（目录名避开 `time`）。
 >
 > 版本演进（timer 这块 1.23 是分水岭）：
@@ -9,7 +23,11 @@
 > - **1.20**：`time.DateOnly`/`TimeOnly`/`DateTime` 三个常用 layout 常量。
 > - **1.23**：**timer 三个行为变化**——未触发的 timer 可被 GC 回收、timer 通道改为同步（无缓冲）、`Stop`/`Reset` 之后不再需要手工 drain。回退开关 `GODEBUG=asynctimerchan=1`（1.27 可能移除）。
 
+<a id="topic-1"></a>
+
 ## 一、基础
+
+<a id="section-1-1"></a>
 
 ### 1.1 `time.Time` 的结构
 
@@ -29,7 +47,9 @@ type Time struct {
 - `loc == nil` 就是 UTC（所有 UTC 时间都用 nil，从不用 `&utcLoc`）；
 - 33 位秒字段以 1885 年为基准，能表示到 2157 年；超范围就退化成只有 wall。
 
-**含 `*Location` 指针意味着含 `time.Time` 的 struct 一定落在 scan span**，GC 每轮都要扫它（见 4.6、mem.md 1.5）。
+**含 `*Location` 指针意味着含 `time.Time` 的 struct 一定落在 scan span**，GC 每轮都要扫它（见 [`Round` / `Truncate` 的方向](#section-4-6)、[noscan：有没有指针决定 GC 扫不扫](mem.md#section-1-5)）。
+
+<a id="section-1-2"></a>
 
 ### 1.2 单调时钟
 
@@ -47,6 +67,8 @@ t2.Round(0).Sub(t1.Round(0))                  // ✗ 退化成墙上时间相减
 ```
 
 铁律：**测耗时一律 `time.Since(start)`**；跨进程/跨机器的时间差只能用墙上时间（且要接受时钟漂移）。
+
+<a id="section-1-3"></a>
 
 ### 1.3 `Duration`
 
@@ -68,6 +90,8 @@ time.Duration(sec) * time.Second   // ✓ 3s
 ```
 
 第二个尤其致命：从配置里读到 `timeout: 30`（秒），写成 `time.Duration(cfg.Timeout)` 就变成了 30 纳秒，超时立刻触发。
+
+<a id="section-1-4"></a>
 
 ### 1.4 格式化
 
@@ -97,6 +121,8 @@ BenchmarkParseRFC3339-8     36.48 ns/op    0 B/op   0 allocs/op
 BenchmarkUnixVsFormat-8      1.12 ns/op    0 B/op   0 allocs/op   ← 能用时间戳就别格式化
 ```
 
+<a id="section-1-5"></a>
+
 ### 1.5 时区
 
 ```go
@@ -113,7 +139,11 @@ utc.Unix() == utc.In(sh).Unix()                  // true —— Unix 时间戳�
 
 `time.Local` 取决于 `TZ` 环境变量和 `/etc/localtime`，这意味着**同一份代码在不同机器上 `time.Now()` 的展示结果不同**——又一个"只在展示层碰时区"的理由。
 
+<a id="topic-2"></a>
+
 ## 二、Timer / Ticker
+
+<a id="section-2-1"></a>
 
 ### 2.1 Timer 与 `Stop` 的返回值
 
@@ -145,6 +175,8 @@ GODEBUG=asynctimerchan=1（模拟 1.22）：
 
 **结论：老代码里那段 `if !t.Stop() { <-t.C }` 在 1.23+ 是 bug**，会在"时间已过但没接收"这种情况下永久阻塞。
 
+<a id="section-2-2"></a>
+
 ### 2.2 Go 1.23 的三个变化
 
 `time/sleep.go` 的 `NewTimer` 文档原文把三件事说得很清楚：
@@ -167,7 +199,9 @@ len(t.C)=0 cap(t.C)=0
 
 > as of Go 1.23, any receive from t.C after Stop has returned is guaranteed to block rather than receive a stale time value from before the Stop
 
-新代码直接 `t.Reset(d)` 就行。要兼容 1.22 及更早的库，drain 逻辑还得留着（而且必须写成 `select { case <-t.C: default: }` 才不会阻塞）。
+本仓库的 Go 1.26.3 默认配置可直接调用 `t.Reset(d)`。新语义取决于主模块的 `go` 版本及 GODEBUG 设置；`GODEBUG=asynctimerchan=1` 会恢复旧行为。旧模式下需要由同一个拥有者协调 Stop、接收和 Reset；不要在存在并发接收者时机械套用 drain 模板。
+
+<a id="section-2-3"></a>
 
 ### 2.3 Ticker
 
@@ -189,6 +223,8 @@ tick 3 at 16ms
 - **Ticker 必须 `Stop`**——1.23 的 GC 改进**不覆盖 Ticker**（它自己在 runtime 里注册并不断重新装填）。文档原文：*the underlying Ticker is not recovered by the garbage collector*；
 - `time.Tick(d)` 拿不到 Ticker 对象，**永远无法 Stop**，只能用于"活到进程结束"的场景。
 
+<a id="section-2-4"></a>
+
 ### 2.4 `AfterFunc`
 
 ```go
@@ -201,7 +237,11 @@ t.Stop()
 - `Stop()` 返回 `false` **不代表回调已完成**——它可能正在跑，要同步得自己配合（文档明确说 *Stop does not wait for f to complete*）；
 - 用途：超时后触发动作（取消 context、关连接），比 `select + timer` 省一个 goroutine。`context.WithTimeout` 内部就是 `AfterFunc`。
 
+<a id="topic-3"></a>
+
 ## 三、runtime 侧的实现
+
+<a id="section-3-1"></a>
 
 ### 3.1 数据结构
 
@@ -217,6 +257,8 @@ type timers struct {
 }
 ```
 
+<a id="section-3-2"></a>
+
 ### 3.2 演进
 
 | 版本 | 实现 |
@@ -226,9 +268,11 @@ type timers struct {
 | **1.14+** | **每个 P 一个 timer 堆**，由调度器在 `schedule()` 里顺便检查；**没有 timer goroutine 了** |
 | 1.23 | timer 可被 GC 回收；通道语义改为同步 |
 
-触发路径：`schedule()` → `checkTimers()` → 执行到期 timer 的 `f`（`sendTime` 往通道发送，或 `goroutineReady` 唤醒 `Sleep` 的 goroutine）。`sysmon` 也会检查最近的 `when`，必要时唤醒空闲 P。netpoll 的超时同样走这套——`SetDeadline` 就是在 `pollDesc` 上挂一个 runtime timer（netpoll.md 4.1）。
+触发路径：`schedule()` → `checkTimers()` → 执行到期 timer 的 `f`（`sendTime` 往通道发送，或 `goroutineReady` 唤醒 `Sleep` 的 goroutine）。`sysmon` 也会检查最近的 `when`，必要时唤醒空闲 P。netpoll 的超时同样走这套——`SetDeadline` 就是在 `pollDesc` 上挂一个 runtime timer（[`SetDeadline` 是唯一能打断阻塞 IO 的正规手段](netpoll.md#section-4-1)）。
 
 所以"**大量 timer 会不会成为瓶颈**"的答案是：分散在各 P 上比全局堆好很多，但单个 P 上百万 timer 的插入/删除仍是 O(log n) 且要抢那把 `mu`。做百万连接的心跳时，通常改成**时间轮**或按秒分桶的方案，而不是给每个连接一个 timer。
+
+<a id="section-3-3"></a>
 
 ### 3.3 取时间的成本
 
@@ -243,7 +287,11 @@ BenchmarkTimeNowUnixNano-8    83.37 ns/op
 - 只需要"过了多久" → `time.Since`（省一次墙上时间读取）；
 - 日志/指标打时间戳 → 用一个后台 goroutine 每毫秒更新一个 `atomic.Int64` 缓存（牺牲精度换性能，很多高性能日志库这么干）。
 
+<a id="topic-4"></a>
+
 ## 四、常见陷阱
+
+<a id="section-4-1"></a>
 
 ### 4.1 `time.After` 在循环里
 
@@ -281,14 +329,30 @@ for {
 }
 ```
 
-### 4.2 Ticker 忘记 Stop
+<a id="section-4-2"></a>
 
-```text
-goroutine 数没变（1 -> 1）：Ticker 不开 goroutine
-但它在 runtime 的 timer 堆里注册着，且不断重新装填 -> 永远不会被回收
+### 4.2 Ticker 的回收与任务退出
+
+Go 1.23+ 默认语义下，无引用的 Ticker 即使没有 Stop 也能被 GC 回收。不能再把“忘记 Stop”一概描述为永久内存泄漏；旧版或 `GODEBUG=asynctimerchan=1` 回退模式需另行考虑。
+
+`Stop` 的用途是明确停止后续 tick，但它**不会关闭 `C`**，也不会让 `for range ticker.C` 自动退出。后台任务应同时设计取消路径：
+
+```go
+ticker := time.NewTicker(time.Second)
+defer ticker.Stop()
+for {
+    select {
+    case <-ctx.Done():
+        return
+    case <-ticker.C:
+        doWork()
+    }
+}
 ```
 
-这是**真泄漏**，且 `pprof` 的 goroutine profile 里看不出来（因为不涉及 goroutine）。表现是内存缓慢增长 + GC 时间变长。用 `runtime/metrics` 也看不到 timer 数量，只能靠 code review 和"`NewTicker` 后面一定跟 `defer Stop`"的纪律。
+如果 goroutine 一直等待 ticker 且没有退出路径，仍可能发生 goroutine 泄漏。要分别检查“定时器是否可回收”和“任务是否会退出”，见 [Go 1.23 的三个变化](#section-2-2)、[Ticker](#section-2-3)。
+
+<a id="section-4-3"></a>
 
 ### 4.3 `time.Time` 的比较
 
@@ -307,6 +371,8 @@ utc.Equal(...)     ->  true
 
 比较性能：`Equal`/`Before` 约 3.2ns，`UnixNano` 直接比较 0.69ns——热路径上存 int64 更划算。
 
+<a id="section-4-4"></a>
+
 ### 4.4 Sleep 的精度
 
 ```text
@@ -320,6 +386,8 @@ Sleep(1ms)      实际 1.2ms   （1.2x）
 
 另外 `time.Sleep(0)` **不等于** `runtime.Gosched()`：前者直接返回，不让出 P。
 
+<a id="section-4-5"></a>
+
 ### 4.5 `time.Time` 在 struct 里
 
 ```go
@@ -329,9 +397,11 @@ type record struct {
 }                          // 32 字节
 ```
 
-- 含 `*Location` 指针 → **落在 scan span，GC 每轮都要扫**。海量记录时用 `int64` 存 Unix 纳秒更省（8 字节 + noscan，见 mem.md 1.5）；
-- JSON 序列化默认输出 RFC3339Nano，反序列化也**只认这个格式**；自定义格式要实现 `MarshalJSON`/`UnmarshalJSON`（见 json.md 2.1）；
+- 含 `*Location` 指针 → **落在 scan span，GC 每轮都要扫**。海量记录时用 `int64` 存 Unix 纳秒更省（8 字节 + noscan，见 [noscan：有没有指针决定 GC 扫不扫](mem.md#section-1-5)）；
+- JSON 序列化默认输出 RFC3339Nano，反序列化也**只认这个格式**；自定义格式要实现 `MarshalJSON`/`UnmarshalJSON`（见 [encoder 的选择优先级](json.md#topic-9)）；
 - 零值判断用 `t.IsZero()`，不要写 `t == time.Time{}`。
+
+<a id="section-4-6"></a>
 
 ### 4.6 `Round` / `Truncate` 的方向
 
@@ -342,6 +412,8 @@ d.Truncate(time.Hour)   // 1h0m0s   ← 向下取整
 ```
 
 `Time.Truncate` 是**相对于零时刻**取整（不是相对于当天零点），跨时区时容易出意外。想要"当天零点"用 `time.Date(y, m, d, 0, 0, 0, 0, loc)`。
+
+<a id="section-4-7"></a>
 
 ### 4.7 定时任务不要用 Ticker 做"整点触发"
 
@@ -357,49 +429,51 @@ for {
 
 或者用 `robfig/cron` 这类库（支持 crontab 表达式和时区）。
 
+<a id="topic-5"></a>
+
 ## 五、常见面试题
 
 **1. `time.Time` 里为什么有两个时钟？**
-`wall` 存墙上时间（可能被 NTP 校正、被人手动改），`ext` 在 `hasMonotonic=1` 时存单调时钟读数（进程启动以来的纳秒）。`Sub`/`Since` 优先用单调时钟，所以测耗时不受改系统时间影响（1.9 引入）（见 1.1、1.2）。
+`wall` 存墙上时间（可能被 NTP 校正、被人手动改），`ext` 在 `hasMonotonic=1` 时存单调时钟读数（进程启动以来的纳秒）。`Sub`/`Since` 优先用单调时钟，所以测耗时不受改系统时间影响（1.9 引入）（见 [`time.Time` 的结构](#section-1-1)、[单调时钟](#section-1-2)）。
 
 **2. 哪些操作会丢掉单调时钟？后果是什么？**
-`Round`/`Truncate`/`UTC`/`Local`/`In`/`AddDate`。丢掉之后 `Sub` 退化成墙上时间相减，可能得到负数或跳变。所以"存下来的时间"和"用来测耗时的时间"要分开处理（见 1.2）。
+`Round`/`Truncate`/`UTC`/`Local`/`In`/`AddDate`。丢掉之后 `Sub` 退化成墙上时间相减，可能得到负数或跳变。所以"存下来的时间"和"用来测耗时的时间"要分开处理（见 [单调时钟](#section-1-2)）。
 
 **3. Go 1.23 对 timer 做了哪三个改动？**
-① 未触发的 timer 可被 GC 回收（`defer t.Stop()` 不再是为了防泄漏）；② timer 通道从有缓冲改为同步；③ `Stop`/`Reset` 之后不需要手工 drain。回退开关 `GODEBUG=asynctimerchan=1`（见 2.2）。
+① 未触发的 timer 可被 GC 回收（`defer t.Stop()` 不再是为了防泄漏）；② timer 通道从有缓冲改为同步；③ `Stop`/`Reset` 之后不需要手工 drain。回退开关 `GODEBUG=asynctimerchan=1`（见 [Go 1.23 的三个变化](#section-2-2)）。
 
 **4. 1.23 之后 `if !t.Stop() { <-t.C }` 为什么是 bug？**
-实测：时间已过但没人接收时，1.23+ 的 `Stop()` 返回 **true**（1.22 返回 false），且通道里没有值。老代码在这种情况下会执行 `<-t.C` 并**永久阻塞**（见 2.1）。
+实测：时间已过但没人接收时，1.23+ 的 `Stop()` 返回 **true**（1.22 返回 false），且通道里没有值。老代码在这种情况下会执行 `<-t.C` 并**永久阻塞**（见 [Timer 与 `Stop` 的返回值](#section-2-1)）。
 
 **5. `time.After` 会泄漏吗？**
-1.23 之前会：timer 挂在 runtime 里直到到期，循环中大量创建就是泄漏。1.23 之后 GC 能回收，但每次循环仍要新建 timer 并插堆（实测 347ns/248B/3allocs vs 复用 Timer 的 191ns/0B）。正确做法是复用一个 Timer + `Reset`（见 4.1）。
+1.23 之前会：timer 挂在 runtime 里直到到期，循环中大量创建就是泄漏。1.23 之后 GC 能回收，但每次循环仍要新建 timer 并插堆（实测 347ns/248B/3allocs vs 复用 Timer 的 191ns/0B）。正确做法是复用一个 Timer + `Reset`（见 [`time.After` 在循环里](#section-4-1)）。
 
 **6. Timer 和 Ticker 谁必须 Stop？**
-**Ticker 必须**（1.23 的 GC 改进不覆盖它，它会不断重新装填）。Timer 现在不 Stop 也能被回收。`time.Tick` 拿不到对象，永远无法 Stop（见 2.3、4.2）。
+**Ticker 必须**（1.23 的 GC 改进不覆盖它，它会不断重新装填）。Timer 现在不 Stop 也能被回收。`time.Tick` 拿不到对象，永远无法 Stop（见 [Ticker](#section-2-3)、[Ticker 的回收与任务退出](#section-4-2)）。
 
 **7. Ticker 的 tick 会堆积吗？**
-不会。通道容量 1，消费不及时的 tick 直接丢弃、不补发。所以它保证"不早于周期"，不保证"每周期一次"。要精确计数得自己记时间（见 2.3）。
+不会。通道容量 1，消费不及时的 tick 直接丢弃、不补发。所以它保证"不早于周期"，不保证"每周期一次"。要精确计数得自己记时间（见 [Ticker](#section-2-3)）。
 
 **8. runtime 是怎么管理 timer 的？有专门的 goroutine 吗？**
-1.14 起**每个 P 一个四叉小顶堆**，调度器在 `schedule()` 里顺便 `checkTimers()`，**没有专门的 timer goroutine**（1.9 之前有 `timerproc`，1.10-1.13 是 64 个全局桶）。`sysmon` 也会检查最近的 when 并唤醒空闲 P（见 3.1、3.2）。
+1.14 起**每个 P 一个四叉小顶堆**，调度器在 `schedule()` 里顺便 `checkTimers()`，**没有专门的 timer goroutine**（1.9 之前有 `timerproc`，1.10-1.13 是 64 个全局桶）。`sysmon` 也会检查最近的 when 并唤醒空闲 P（见 [数据结构](#section-3-1)、[演进](#section-3-2)）。
 
 **9. 百万连接的心跳超时怎么做？**
-不要给每个连接一个 timer——单 P 的 timer 堆插删是 O(log n) 且抢同一把锁。用**时间轮**或"按秒分桶 + 一个 Ticker 扫桶"，把 n 个 timer 压成 1 个（见 3.2）。
+不要给每个连接一个 timer——单 P 的 timer 堆插删是 O(log n) 且抢同一把锁。用**时间轮**或"按秒分桶 + 一个 Ticker 扫桶"，把 n 个 timer 压成 1 个（见 [演进](#section-3-2)）。
 
 **10. 为什么不能用 `==` 比较 `time.Time`？**
-`==` 是 struct 比较，会比 `loc` 指针和单调时钟位。同一时刻的 UTC 和 CST 表示、`t` 和 `t.Round(0)` 都不相等。用 `Equal`/`Before`/`After`。也别把 `time.Time` 当 map key（见 4.3）。
+`==` 是 struct 比较，会比 `loc` 指针和单调时钟位。同一时刻的 UTC 和 CST 表示、`t` 和 `t.Round(0)` 都不相等。用 `Equal`/`Before`/`After`。也别把 `time.Time` 当 map key（见 [`time.Time` 的比较](#section-4-3)）。
 
 **11. `time.Duration(n)` 的坑是什么？**
-`time.Duration` 的单位是纳秒。从配置读到 `30`（秒）写成 `time.Duration(30)` 就是 30ns。必须写 `time.Duration(n) * time.Second`。另外 `int * time.Second` 编译不过，只有无类型常量可以（见 1.3）。
+`time.Duration` 的单位是纳秒。从配置读到 `30`（秒）写成 `time.Duration(30)` 就是 30ns。必须写 `time.Duration(n) * time.Second`。另外 `int * time.Second` 编译不过，只有无类型常量可以（见 [`Duration`](#section-1-3)）。
 
 **12. `time.Sleep(1ms)` 真的睡 1ms 吗？**
-不是。实测 `Sleep(1ns)` 实际 63µs、`Sleep(1ms)` 实际 1.2ms。只保证"至少 d"，受 OS 定时器精度和调度延迟影响。亚毫秒定时在通用 OS 上不可靠（见 4.4）。
+不是。实测 `Sleep(1ns)` 实际 63µs、`Sleep(1ms)` 实际 1.2ms。只保证"至少 d"，受 OS 定时器精度和调度延迟影响。亚毫秒定时在通用 OS 上不可靠（见 [Sleep 的精度](#section-4-4)）。
 
 **13. `time.Now()` 有多贵？高频取时间怎么优化？**
-实测 84ns（两次时钟读取）。`time.Since` 只读单调时钟，40ns。极端场景用后台 goroutine 每毫秒刷新一个 `atomic.Int64` 缓存，用精度换性能（见 3.3）。
+实测 84ns（两次时钟读取）。`time.Since` 只读单调时钟，40ns。极端场景用后台 goroutine 每毫秒刷新一个 `atomic.Int64` 缓存，用精度换性能（见 [取时间的成本](#section-3-3)）。
 
 **14. 容器里 `time.LoadLocation("Asia/Shanghai")` 报错怎么办？**
-scratch/alpine 镜像没有 `/usr/share/zoneinfo`。两条路：装 tzdata 包，或 `import _ "time/tzdata"`（1.15+，把时区库编进二进制，约 450KB）（见 1.5）。
+scratch/alpine 镜像没有 `/usr/share/zoneinfo`。两条路：装 tzdata 包，或 `import _ "time/tzdata"`（1.15+，把时区库编进二进制，约 450KB）（见 [时区](#section-1-5)）。
 
 **15. Go 的时间格式化为什么用 "2006-01-02"？**
-用一个具体的**参考时间** `Mon Jan 2 15:04:05 MST 2006` 来表达布局，各字段对应 1/2/3/4/5/6/-7，比 `%Y-%m-%d` 更直观（不用记字母含义），代价是要记住这个魔法时间。注意 `Parse` 对补零严格匹配（见 1.4）。
+用一个具体的**参考时间** `Mon Jan 2 15:04:05 MST 2006` 来表达布局，各字段对应 1/2/3/4/5/6/-7，比 `%Y-%m-%d` 更直观（不用记字母含义），代价是要记住这个魔法时间。注意 `Parse` 对补零严格匹配（见 [格式化](#section-1-4)）。

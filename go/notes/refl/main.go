@@ -97,7 +97,7 @@ func basicTypeValue() {
 	fmt.Println("  嵌套取：  ", v.FieldByName("Addr").FieldByName("City").String())
 	fmt.Println("  索引路径：", v.FieldByIndex([]int{3, 0}).String())
 
-	// 值类型 vs 指针类型的方法集差异（method.md 2.2）
+	// 值类型 vs 指针类型的方法集差异（method.md#section-2-2）
 	fmt.Printf("  reflect.TypeOf(u).NumMethod()  = %d（值方法：Greet/String）\n", t.NumMethod())
 	fmt.Printf("  reflect.TypeOf(&u).NumMethod() = %d（值方法 + 指针方法 SetName）\n",
 		reflect.TypeOf(&u).NumMethod())
@@ -489,7 +489,7 @@ func trapPerf() {
 	fmt.Println("    · DeepEqual 有分配，热路径上不要用；能直接比就直接比")
 	fmt.Println()
 	fmt.Println("  四条优化手法（标准库和主流库都在用）：")
-	fmt.Println("    ① 缓存 Type 级别的解析结果（encoding/json 的 cachedTypeFields，见 json.md 2.1）")
+	fmt.Println("    ① 缓存 Type 级别的解析结果（encoding/json 的 cachedTypeFields，见 json.md#topic-18）")
 	fmt.Println("    ② 用 []int 索引路径代替 FieldByName（FieldByIndex 快得多）")
 	fmt.Println("    ③ 走一次反射生成闭包/代码，之后走闭包（sqlx、gorm 的做法）")
 	fmt.Println("    ④ 干脆代码生成（easyjson、protobuf-go）——零反射")

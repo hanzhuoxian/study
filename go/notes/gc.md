@@ -1,19 +1,28 @@
 # GC
 
+> 定位：垃圾回收机制、指标与调优。
+> 前置知识：[内存分配与栈](mem.md)。
+> 配套示例：[gc/main.go](gc/main.go)（`go run ./gc`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [调优与陷阱](#topic-3)；深入实现或进阶用法时读 [底层原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [底层原理](#topic-2)
+- [调优与陷阱](#topic-3)
+- [常见面试题](#topic-4)
+- [版本沿革](#version-history)
+
 > 环境：`go version go1.26.3`。源码：`runtime/{mgc,mgcpacer,mgcmark,mgcsweep,mbarrier,mwbbuf,mgcscavenge}.go`。配套代码：`notes/gc/`。
 >
-> 版本演进（面试爱问，且网上资料版本混乱）：
-> - **1.3**：mark & sweep，STW 标记，停顿几百 ms。
-> - **1.5**：并发标记清扫（CMS 风格三色标记），插入写屏障，停顿降到十毫秒级。
-> - **1.8**：**混合写屏障**（Dijkstra 插入 + Yuasa 删除），消掉 mark termination 里的**栈重扫**，停顿进入亚毫秒级。这是 GC 停顿"与堆大小解耦"的分水岭。
-> - **1.12**：清扫改成并发 + 惰性；`mheap` 的 treap 改造。
-> - **1.14**：**异步抢占**，解决"紧密循环里没有函数调用导致 GC 无法进入 STW"的老问题。
-> - **1.18**：pacer 重写（`mgcpacer.go` 的 PI 控制器形态），把栈和全局的扫描量也纳入计算。
-> - **1.19**：**`GOMEMLIMIT`** 软内存上限；GC 指南（`doc/gc-guide.html`）进入官方文档。
-> - **1.24**：`runtime.AddCleanup` 取代 `SetFinalizer`。
-> - **1.25/1.26**：**Green Tea 标记算法**，1.26 起**默认开启**（`internal/buildcfg/exp.go` 的 baseline 里 `GreenTeaGC: true`）。
+> 当前实现与调优规则见正文；[版本沿革](#version-history) 集中放在附录。
+
+<a id="topic-1"></a>
 
 ## 一、基础使用
+
+<a id="section-1-1"></a>
 
 ### 1.1 GC 什么时候触发
 
@@ -29,6 +38,8 @@
 分配 40MB 垃圾后 GC 次数: 0 -> 11      # 堆触发
 runtime.GC() 之后:        11 -> 12     # 手动触发
 ```
+
+<a id="section-1-2"></a>
 
 ### 1.2 heap goal：GOGC 到底控制什么
 
@@ -49,6 +60,8 @@ GOGC=400  live=20MB goal=102MB（5.0x）
 - **有下限**：`defaultHeapMinimum = 4MB`（GOGC=100 时，`mgcpacer.go:57`）。小堆程序不会因为 live 只有几十 KB 就疯狂 GC。
 - **实际公式比这个复杂**：1.18 之后的 pacer 还把**栈扫描量**和**全局变量扫描量**算进 goal，并用一个反馈控制器预测"什么时候开始标记才刚好在 goal 处结束"（`gcControllerState.revise()`）。`GODEBUG=gcpacertrace=1` 能看到每轮的决策。
 
+<a id="section-1-3"></a>
+
 ### 1.3 MemStats：能看什么，代价是什么
 
 ```go
@@ -68,6 +81,8 @@ GCCPUFraction  9.5%         启动至今 GC 占的 CPU
 ```
 
 `ReadMemStats` **会 STW**，指标采集里每秒调几次就是自己给自己加停顿。现代做法是 `runtime/metrics`。
+
+<a id="section-1-4"></a>
 
 ### 1.4 runtime/metrics：现在应该用这个
 
@@ -93,7 +108,11 @@ metrics.Read(samples)   // 不 STW
 
 实测本机某轮：`/gc/pauses:seconds p50=16µs p99=262µs`。
 
+<a id="topic-2"></a>
+
 ## 二、底层原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 三色抽象与实际实现
 
@@ -106,6 +125,8 @@ Go 的实现里**没有"灰色位"**：颜色 = mark bit + 是否在工作队列
 - 黑 = mark bit 已置位 **且** 已从队列取出扫描完。
 
 mark bit 存在 span 的 `gcmarkBits` 位图里（不在对象头上，所以对象没有额外的 header 开销）。
+
+<a id="section-2-2"></a>
 
 ### 2.2 混合写屏障：为什么 Go 的停顿和堆大小无关
 
@@ -134,6 +155,8 @@ writePointer(slot, ptr):
 
 **写屏障只在 `_GCmark`/`_GCmarktermination` 阶段开启**（`setGCPhase` 里 `writeBarrier.enabled = ...`），`_GCoff` 时是一个全局 bool 判断，代价接近零。
 
+<a id="section-2-3"></a>
+
 ### 2.3 一轮 GC 的五个阶段
 
 `runtime/mgc.go` 顶部注释给的顺序，配上函数名：
@@ -154,6 +177,8 @@ writePointer(slot, ptr):
 ```
 
 注意 `PauseNs` 记录的是**每一段** STW（一轮 GC 贡献两段）。
+
+<a id="section-2-4"></a>
 
 ### 2.4 谁在干标记的活：25% + assist
 
@@ -190,6 +215,8 @@ STW清扫终止 + assist/后台/空闲 + STW标记终止
 
 第一个数字大 = mutator 被罚得多 = 该调大 GOGC 或降低分配速率。
 
+<a id="section-2-5"></a>
+
 ### 2.5 Green Tea 标记算法（1.26 默认开启）
 
 `runtime/mgcmark_greenteagc.go` 的注释讲得很直白：
@@ -213,6 +240,8 @@ go env GOEXPERIMENT              # 空 = 全是 baseline 默认值
 GOEXPERIMENT=nogreenteagc go build ...   # 显式关掉做 A/B
 ```
 
+<a id="section-2-6"></a>
+
 ### 2.6 清扫（sweep）与内存归还
 
 **清扫**只是把 span 里"没被标记的对象"标记为可分配，**不写内存、不 memset**。它是并发的：`bgsweep` goroutine + 分配时按需清扫（`mcentral.cacheSpan` 里）。所以"GC 结束"不等于"内存可用"。
@@ -230,7 +259,9 @@ FreeOSMemory 后: HeapAlloc=0MB   HeapIdle=107MB HeapReleased=107MB
 - `debug.FreeOSMemory()` 立即强制归还（同时强制一轮 GC），代价是下次分配要重新触发缺页；
 - Linux/darwin 默认 `MADV_DONTNEED`，`GODEBUG=madvdontneed=0` 改成 `MADV_FREE`（RSS 降得更慢，但重用更快）。
 
-**结论：`RSS` 不降 ≠ 内存泄漏**（见 3.5 的排查顺序）。
+**结论：`RSS` 不降 ≠ 内存泄漏**（见 [陷阱：RSS 不降就以为泄漏](#section-3-5) 的排查顺序）。
+
+<a id="section-2-7"></a>
 
 ### 2.7 关键源码索引
 
@@ -249,7 +280,11 @@ FreeOSMemory 后: HeapAlloc=0MB   HeapIdle=107MB HeapReleased=107MB
 | `runtime/mgcscavenge.go` | 归还 OS 的 pacing |
 | `runtime/extern.go:104-135` | `gctrace`/`gcpacertrace`/`gcstoptheworld`/`madvdontneed` 的官方说明 |
 
+<a id="topic-3"></a>
+
 ## 三、调优与陷阱
+
+<a id="section-3-1"></a>
 
 ### 3.1 GOGC
 
@@ -268,6 +303,8 @@ GOGC=off GODEBUG=gctrace=1   -> NumGC=0  HeapAlloc=60MB HeapSys=64MB
 
 调优原则：**先看 `/cpu/classes/gc/total:cpu-seconds` 占总 CPU 的比例**。低于 5% 基本没必要动；超过 20% 且内存有余量，调大 GOGC 是最简单有效的一步。
 
+<a id="section-3-2"></a>
+
 ### 3.2 GOMEMLIMIT（1.19+）
 
 ```go
@@ -284,6 +321,8 @@ debug.SetMemoryLimit(-1)        // 只读当前值
 - **死亡螺旋防护**：GC CPU 占比被限制在 **50%**，宁可超过内存上限也不把 CPU 全烧在 GC 上。
 - 最实用的组合：**`GOGC=off` + `GOMEMLIMIT=<容器上限的 85%>`**——只在快撞上限时才 GC，把内存吃满换取最少的 GC 次数。前提是你的程序**峰值内存可控**，否则会退化成持续 GC。
 
+<a id="section-3-3"></a>
+
 ### 3.3 ballast（历史技巧，现在别用）
 
 ```go
@@ -295,6 +334,8 @@ runtime.KeepAlive(ballast)
 
 1.19 之后请用 `GOGC` + `GOMEMLIMIT` 代替：语义明确、可观测、不依赖 OS 的懒分配行为，也不会在容器里被 `MADV_DONTNEED`/统计口径差异坑到。
 
+<a id="section-3-4"></a>
+
 ### 3.4 减少 GC 压力的真正手段
 
 调旋钮之外，能从根上减压的（按性价比排序）：
@@ -302,9 +343,11 @@ runtime.KeepAlive(ballast)
 1. **减少分配次数**（不是减少字节数）：`pprof -alloc_objects` 找热点。
 2. **预分配容量**：`make([]T, 0, n)`、`strings.Builder.Grow(n)`，避免多次扩容拷贝。
 3. **对象复用**：`sync.Pool`（见 pool.md），注意只对"构造成本高 + 本来会逃逸"的对象划算。
-4. **避免不必要的逃逸**：`-gcflags=-m` 看逃逸原因；接口装箱、闭包捕获、返回局部指针是三大来源（见 func.md 2.4、mem.md）。
+4. **避免不必要的逃逸**：`-gcflags=-m` 看逃逸原因；接口装箱、闭包捕获、返回局部指针是三大来源（见 [逃逸分析](func.md#section-2-4)、mem.md）。
 5. **减少指针**：`[]int` 比 `[]*int` 扫得快得多；无指针对象所在的 span 根本不需要扫描（`spanClass.noscan`）。把 `map[string]*T` 换成 `map[string]int`（索引到一个大 slice）能显著缩短标记时间。
 6. **控制 goroutine 数量**：每个 goroutine 的栈都是 root，栈越多、越深，root 扫描越久。
+
+<a id="section-3-5"></a>
 
 ### 3.5 陷阱：RSS 不降就以为泄漏
 
@@ -317,7 +360,9 @@ runtime.KeepAlive(ballast)
 | `/memory/classes/heap/free:bytes` 很大 | 峰值过后的空 span / 碎片 |
 | `total:bytes` 减去 heap 部分很大 | 栈（goroutine 太多）、元数据，或者 cgo |
 
-真泄漏的常见来源：goroutine 泄漏（连带它的栈和闭包）、全局 map/slice 只增不删、大 slice 截小后仍持有整个底层数组（slice.md 3.3）、`time.Ticker` 忘 `Stop`、`context` 没 cancel（context.md 3.x）。
+真泄漏的常见来源：goroutine 泄漏（连带它的栈和闭包）、全局 map/slice 只增不删、大 slice 截小后仍持有整个底层数组（[大 slice 截取小 slice 造成的内存泄漏](slice.md#section-3-3)）、`time.Ticker` 忘 `Stop`、`context` 没 cancel（context.md 3.x）。
+
+<a id="section-3-6"></a>
 
 ### 3.6 陷阱：SetFinalizer
 
@@ -333,6 +378,8 @@ runtime.SetFinalizer(r, func(r *resource) { r.Close() })
 - **不保证顺序**；循环引用中的对象 finalizer **永不执行**（1.24 之前）。
 - finalizer 里让对象重新可达 → 对象**永生**。
 - 有 finalizer 的对象**不能是零大小**，也不能是"分配块内部的指针"。
+
+<a id="section-3-7"></a>
 
 ### 3.7 用 `runtime.AddCleanup` 代替（1.24+）
 
@@ -353,9 +400,13 @@ runtime.AddCleanup(h, func(fd int) { syscall.Close(fd) }, h.fd)  // 注意 arg �
 
 注意 `AddCleanup` 依然**不保证时机**。它的正确定位是"资源忘关时的兜底 + 告警"，正常路径永远是 `defer Close()`。
 
+<a id="section-3-8"></a>
+
 ### 3.8 陷阱：用 runtime.GC() "优化"
 
 `runtime.GC()` 会**阻塞到本轮 GC 完成**（含两次 STW），在请求路径上调用等于自造停顿。合理场景只有三个：基准测试前清场、测内存占用前稳定 live、进程即将长时间空闲（配合 `debug.FreeOSMemory()`）。
+
+<a id="section-3-9"></a>
 
 ### 3.9 陷阱：`GOMAXPROCS` 与 GC 的联动
 
@@ -366,6 +417,8 @@ runtime.AddCleanup(h, func(fd int) { syscall.Close(fd) }, h.fd)  // 注意 arg �
 
 **Go 1.25 起 runtime 会读 cgroup CPU limit 自动设置 `GOMAXPROCS`**（并在 limit 变化时动态更新）。1.25 之前的版本用 `uber-go/automaxprocs`，或者显式设 `GOMAXPROCS`。
 
+<a id="section-3-10"></a>
+
 ### 3.10 陷阱：大量小对象 vs 少量大对象
 
 同样 100MB：
@@ -374,6 +427,8 @@ runtime.AddCleanup(h, func(fd int) { syscall.Close(fd) }, h.fd)  // 注意 arg �
 - `100 个 1MB 的 []byte`：`noscan` span，标记几乎不花时间。
 
 所以"减少分配"要看的是 **`-alloc_objects`（次数）而不是 `-alloc_space`（字节）**。这也解释了为什么 `map[string][]byte` 换成"一个大 `[]byte` + 偏移索引"能让 GC 时间断崖式下降（很多 cache 库就是这么做的）。
+
+<a id="topic-4"></a>
 
 ## 四、常见面试题
 
@@ -384,13 +439,13 @@ runtime.AddCleanup(h, func(fd int) { syscall.Close(fd) }, h.fd)  // 注意 arg �
 分代的前提是"大部分对象很快死"，收益来自只扫年轻代。但 Go 有两个特殊点：① **逃逸分析**已经把大量短命对象放在栈上（栈上对象根本不进 GC），堆里剩下的对象存活率反而偏高；② 分代需要 **card table / remembered set** 这类额外的写屏障状态，而 Go 的写屏障已经为并发标记服务了，再叠一层代价大。官方多次讨论过分代（有原型），结论是收益不足以抵消复杂度。参考同一个原因：Go 也不做**压缩/整理**，因为没有 moving GC 就不需要处理 unsafe.Pointer/cgo 指针失效的问题。
 
 **3. 三色标记是怎么实现的？灰色存在哪？**
-没有独立的"灰色位"。颜色 = mark bit + 是否在工作队列里：白 = mark 未置位；灰 = mark 已置位且在 `gcWork` 队列中；黑 = mark 已置位且已扫完出队。mark bit 在 span 的位图里，对象本身没有 header（见 2.1）。
+没有独立的"灰色位"。颜色 = mark bit + 是否在工作队列里：白 = mark 未置位；灰 = mark 已置位且在 `gcWork` 队列中；黑 = mark 已置位且已扫完出队。mark bit 在 span 的位图里，对象本身没有 header（见 [三色抽象与实际实现](#section-2-1)）。
 
 **4. 什么是强/弱三色不变性？写屏障保证的是哪个？**
-强三色不变性：黑对象**不允许**指向白对象。弱三色不变性：黑对象可以指向白对象，但**该白对象必须仍有一条从灰对象出发的可达路径**。插入屏障（Dijkstra）保证强不变性，删除屏障（Yuasa）保证弱不变性。Go 的混合屏障同时做两件事：`shade(*slot)` 是删除屏障，`shade(ptr)` 是插入屏障（见 2.2）。
+强三色不变性：黑对象**不允许**指向白对象。弱三色不变性：黑对象可以指向白对象，但**该白对象必须仍有一条从灰对象出发的可达路径**。插入屏障（Dijkstra）保证强不变性，删除屏障（Yuasa）保证弱不变性。Go 的混合屏障同时做两件事：`shade(*slot)` 是删除屏障，`shade(ptr)` 是插入屏障（见 [混合写屏障：为什么 Go 的停顿和堆大小无关](#section-2-2)）。
 
 **5. 混合写屏障解决了什么问题？为什么 1.8 之后停顿骤降？**
-1.8 之前只有插入屏障，而**栈上的写不能加屏障**（太贵），所以标记结束时必须 STW 重扫所有 goroutine 栈，停顿 ∝ goroutine 数 × 栈深度。混合屏障让"栈扫过一次就永久变黑"，mark termination 不再需要重扫栈，停顿变成固定的小开销，与堆大小基本无关（见 2.2）。
+1.8 之前只有插入屏障，而**栈上的写不能加屏障**（太贵），所以标记结束时必须 STW 重扫所有 goroutine 栈，停顿 ∝ goroutine 数 × 栈深度。混合屏障让"栈扫过一次就永久变黑"，mark termination 不再需要重扫栈，停顿变成固定的小开销，与堆大小基本无关（见 [混合写屏障：为什么 Go 的停顿和堆大小无关](#section-2-2)）。
 
 **6. 写屏障的伪代码是什么？两个 shade 各防什么？**
 ```go
@@ -399,37 +454,51 @@ shade(*slot); if 当前栈是灰的 { shade(ptr) }; *slot = ptr
 `shade(*slot)` 防止把"堆里的唯一指针"搬到栈上藏起来；`shade(ptr)` 防止把"栈上的唯一指针"塞进黑对象里藏起来。栈变黑之后第二个就不必要了（`mbarrier.go` 的三条注释）。
 
 **7. 一轮 GC 有几次 STW？分别在干什么？**
-两次：**sweep termination**（让所有 P 到安全点、扫完上轮遗留 span、开写屏障并入队 root 任务）和 **mark termination**（关 worker/assist、flush mcache、计算下轮 goal）。两段都在百微秒级，本机实测 p99 = 262µs（见 2.3）。
+两次：**sweep termination**（让所有 P 到安全点、扫完上轮遗留 span、开写屏障并入队 root 任务）和 **mark termination**（关 worker/assist、flush mcache、计算下轮 goal）。两段都在百微秒级，本机实测 p99 = 262µs（见 [一轮 GC 的五个阶段](#section-2-3)）。
 
 **8. GC 的 25% CPU 是怎么来的？assist 是什么？**
-`gcBackgroundUtilization = 0.25`：后台标记固定占 `GOMAXPROCS` 的 25%，由 dedicated / fractional / idle 三种 mark worker 实现。不够时启用 **mark assist**：在 `mallocgc` 里给分配者记欠账，欠得多就就地干标记活，所以"分配越猛，单次分配越慢"——这是 GC 的背压机制（见 2.4）。
+`gcBackgroundUtilization = 0.25`：后台标记固定占 `GOMAXPROCS` 的 25%，由 dedicated / fractional / idle 三种 mark worker 实现。不够时启用 **mark assist**：在 `mallocgc` 里给分配者记欠账，欠得多就就地干标记活，所以"分配越猛，单次分配越慢"——这是 GC 的背压机制（见 [谁在干标记的活：25% + assist](#section-2-4)）。
 
 **9. GOGC 到底控制什么？heap goal 怎么算？**
-`goal ≈ live × (1 + GOGC/100)`，`live` 是上轮 GC 结束时的存活量，另有 4MB 下限。1.18 之后 pacer 还把栈和全局的扫描量纳入计算，并用反馈控制器决定何时**开始**标记，使标记刚好在 goal 处结束（见 1.2）。
+`goal ≈ live × (1 + GOGC/100)`，`live` 是上轮 GC 结束时的存活量，另有 4MB 下限。1.18 之后 pacer 还把栈和全局的扫描量纳入计算，并用反馈控制器决定何时**开始**标记，使标记刚好在 goal 处结束（见 [heap goal：GOGC 到底控制什么](#section-1-2)）。
 
 **10. GOMEMLIMIT 和 GOGC 有什么区别？怎么配？**
-GOGC 控制"相对增长比例"，GOMEMLIMIT 控制"绝对内存天花板"。前者在 live 抖动时内存也跟着抖，后者能挡住峰值。它是**软限制**，且只统计 Go runtime 管理的内存（不含 cgo/mmap）。GC CPU 上限 50% 用来防死亡螺旋。生产常用组合：`GOGC=off` + `GOMEMLIMIT = 容器上限 × 85%`（见 3.2）。
+GOGC 控制"相对增长比例"，GOMEMLIMIT 控制"绝对内存天花板"。前者在 live 抖动时内存也跟着抖，后者能挡住峰值。它是**软限制**，且只统计 Go runtime 管理的内存（不含 cgo/mmap）。GC CPU 上限 50% 用来防死亡螺旋。生产常用组合：`GOGC=off` + `GOMEMLIMIT = 容器上限 × 85%`（见 [GOMEMLIMIT（1.19+）](#section-3-2)）。
 
 **11. 为什么 GC 跑完 RSS 没降？**
-GC 只回收对象、清扫只把 span 标为可分配；空 span 先留在 `HeapIdle` 供复用；归还 OS 是 scavenger 的活，按 pacing 慢慢 `madvise`。想立刻还可以 `debug.FreeOSMemory()`。所以要判断泄漏必须看 `/memory/classes/heap/objects:bytes` 而不是 RSS（见 2.6、3.5）。
+GC 只回收对象、清扫只把 span 标为可分配；空 span 先留在 `HeapIdle` 供复用；归还 OS 是 scavenger 的活，按 pacing 慢慢 `madvise`。想立刻还可以 `debug.FreeOSMemory()`。所以要判断泄漏必须看 `/memory/classes/heap/objects:bytes` 而不是 RSS（见 [清扫（sweep）与内存归还](#section-2-6)、[陷阱：RSS 不降就以为泄漏](#section-3-5)）。
 
 **12. `runtime.ReadMemStats` 和 `runtime/metrics` 有什么区别？**
-`ReadMemStats` **会 STW**，字段固定且部分语义含糊；`metrics.Read` 不 STW，本机导出 112 个指标，还带**直方图**（如 `/gc/pauses:seconds`，可直接算 p99）。监控采集一律用后者（见 1.3、1.4）。
+`ReadMemStats` **会 STW**，字段固定且部分语义含糊；`metrics.Read` 不 STW，本机导出 112 个指标，还带**直方图**（如 `/gc/pauses:seconds`，可直接算 p99）。监控采集一律用后者（见 [MemStats：能看什么，代价是什么](#section-1-3)、[runtime/metrics：现在应该用这个](#section-1-4)）。
 
 **13. `SetFinalizer` 有什么坑？`AddCleanup` 好在哪？**
-finalizer 会让对象复活，至少两轮 GC 才释放；不保证执行、不保证顺序；循环引用可能永不执行；一个对象只能挂一个。`AddCleanup`（1.24+）不复活对象、可挂多个、循环引用也执行、可 `Stop()`，但 arg 不能是对象本身（会 panic）。两者都不保证时机，关资源仍应 `defer Close()`（见 3.6、3.7）。
+finalizer 会让对象复活，至少两轮 GC 才释放；不保证执行、不保证顺序；循环引用可能永不执行；一个对象只能挂一个。`AddCleanup`（1.24+）不复活对象、可挂多个、循环引用也执行、可 `Stop()`，但 arg 不能是对象本身（会 panic）。两者都不保证时机，关资源仍应 `defer Close()`（见 [陷阱：SetFinalizer](#section-3-6)、[用 `runtime.AddCleanup` 代替（1.24+）](#section-3-7)）。
 
 **14. Green Tea GC 是什么？（1.25/1.26 新内容）**
-标记阶段的重写：不再逐对象扫描，而是**攒到同一个 span 再批量扫**。span 内联 `marks`/`scans` 两套位图，第一次看到指向该 span 的指针就置 mark 并把 span 入队（FIFO），出队时用两套位图的交并集算出该扫哪些对象，从而在保持精确的前提下大幅改善 cache 局部性。1.26 起默认开启，可用 `GOEXPERIMENT=nogreenteagc` 关掉做 A/B（见 2.5）。
+标记阶段的重写：不再逐对象扫描，而是**攒到同一个 span 再批量扫**。span 内联 `marks`/`scans` 两套位图，第一次看到指向该 span 的指针就置 mark 并把 span 入队（FIFO），出队时用两套位图的交并集算出该扫哪些对象，从而在保持精确的前提下大幅改善 cache 局部性。1.26 起默认开启，可用 `GOEXPERIMENT=nogreenteagc` 关掉做 A/B（见 [Green Tea 标记算法（1.26 默认开启）](#section-2-5)）。
 
 **15. 如何定位 GC 引起的性能问题？**
-① `/cpu/classes/gc/total:cpu-seconds` 看 GC 占了多少 CPU；② `GODEBUG=gctrace=1` 看每轮的 assist 时间占比（第一个 cpu 数字大 = mutator 被罚）和 `#->#->#MB` 的增长；③ `pprof -alloc_objects` 找分配次数热点；④ `runtime/trace` 看 GC 与业务 goroutine 的时间轴重叠。调优优先级：先减分配次数和指针数量，再动 GOGC/GOMEMLIMIT（见 3.4）。
+① `/cpu/classes/gc/total:cpu-seconds` 看 GC 占了多少 CPU；② `GODEBUG=gctrace=1` 看每轮的 assist 时间占比（第一个 cpu 数字大 = mutator 被罚）和 `#->#->#MB` 的增长；③ `pprof -alloc_objects` 找分配次数热点；④ `runtime/trace` 看 GC 与业务 goroutine 的时间轴重叠。调优优先级：先减分配次数和指针数量，再动 GOGC/GOMEMLIMIT（见 [减少 GC 压力的真正手段](#section-3-4)）。
 
 **16. 容器里为什么 GC 会把业务 CPU 挤爆？**
-1.25 之前 runtime 不感知 cgroup CPU quota，`GOMAXPROCS` 取宿主核数，于是"25% 的 GOMAXPROCS"按宿主核算，实际远超容器配额，业务 goroutine 严重饥饿。1.25 起 runtime 自动按 cgroup limit 设置并动态更新 `GOMAXPROCS`；旧版本用 `automaxprocs` 或显式设置（见 3.9）。
+1.25 之前 runtime 不感知 cgroup CPU quota，`GOMAXPROCS` 取宿主核数，于是"25% 的 GOMAXPROCS"按宿主核算，实际远超容器配额，业务 goroutine 严重饥饿。1.25 起 runtime 自动按 cgroup limit 设置并动态更新 `GOMAXPROCS`；旧版本用 `automaxprocs` 或显式设置（见 [陷阱：`GOMAXPROCS` 与 GC 的联动](#section-3-9)）。
 
 **17. 为什么"减少分配"要看次数而不是字节数？**
-标记的成本 ∝ **对象数量和指针数量**，不是字节数。1000 万个 10 字节对象比 100 个 1MB 的 `[]byte` 慢几个数量级，因为后者是 `noscan` span，压根不用扫。所以优化方向是"合并小对象、减少指针、用索引替代指针"（见 3.10）。
+标记的成本 ∝ **对象数量和指针数量**，不是字节数。1000 万个 10 字节对象比 100 个 1MB 的 `[]byte` 慢几个数量级，因为后者是 `noscan` span，压根不用扫。所以优化方向是"合并小对象、减少指针、用索引替代指针"（见 [陷阱：大量小对象 vs 少量大对象](#section-3-10)）。
 
 **18. GC 会移动对象吗？为什么？**
 不会。Go 是非移动（non-moving）GC。原因：`unsafe.Pointer`、cgo 传出去的指针、以及大量假设"指针稳定"的代码都会因移动而失效；不移动也意味着不需要 read barrier。代价是**内存碎片**——Go 靠 size class 分配器把碎片控制在可接受范围（见 mem.md）。栈是唯一例外：栈增长时会**拷贝整个栈并调整指针**（见 mem.md 的栈增长部分）。
+
+<a id="version-history"></a>
+
+## 附录：版本沿革
+
+- **1.3**：mark & sweep，STW 标记，停顿几百 ms。
+- **1.5**：并发标记清扫（CMS 风格三色标记），插入写屏障，停顿降到十毫秒级。
+- **1.8**：**混合写屏障**（Dijkstra 插入 + Yuasa 删除），消掉 mark termination 里的**栈重扫**，停顿进入亚毫秒级。这是 GC 停顿"与堆大小解耦"的分水岭。
+- **1.12**：清扫改成并发 + 惰性；`mheap` 的 treap 改造。
+- **1.14**：**异步抢占**，解决"紧密循环里没有函数调用导致 GC 无法进入 STW"的老问题。
+- **1.18**：pacer 重写（`mgcpacer.go` 的 PI 控制器形态），把栈和全局的扫描量也纳入计算。
+- **1.19**：**`GOMEMLIMIT`** 软内存上限；GC 指南（`doc/gc-guide.html`）进入官方文档。
+- **1.24**：`runtime.AddCleanup` 取代 `SetFinalizer`。
+- **1.25/1.26**：**Green Tea 标记算法**，1.26 起**默认开启**（`internal/buildcfg/exp.go` 的 baseline 里 `GreenTeaGC: true`）。

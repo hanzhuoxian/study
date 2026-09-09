@@ -10,7 +10,7 @@ import (
 
 // go test -bench . -benchmem ./json
 //
-// 对应 notes/json.md 二（encoderCache / typeFields 缓存）、2.3（map key 排序）、五（流式）。
+// 对应 notes/json.md 的 Marshal 源码、typeFields 缓存、map key 排序与流式编解码小节。
 //
 // 实测（go1.26.3 darwin/amd64, i5-1038NG7）：
 //

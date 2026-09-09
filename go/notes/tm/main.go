@@ -414,24 +414,24 @@ func trapAfterLeak() {
 }
 
 // ---------------------------------------------------------------------------
-// 4.2 Ticker 忘记 Stop
+// 4.2 Ticker 的回收与退出
 // ---------------------------------------------------------------------------
 
 func trapTickerLeak() {
-	section("4.2 Ticker 忘记 Stop = 真泄漏")
+	section("4.2 Ticker 的回收与任务退出")
 
 	before := runtime.NumGoroutine()
 	for range 3 {
 		tk := time.NewTicker(time.Hour)
-		_ = tk // 忘记 Stop
+		_ = tk // 不再引用：Go 1.23+ 默认语义允许 GC 回收
 	}
 	runtime.GC()
 	fmt.Printf("  goroutine 数没变（%d -> %d）：Ticker 不开 goroutine\n",
 		before, runtime.NumGoroutine())
-	fmt.Println("  但它在 runtime 的 timer 堆里注册着，且会不断重新装填 -> 永远不会被回收")
-	fmt.Println("→ Ticker 和 Timer 不一样：**Ticker 必须 Stop**（1.23 的 GC 改进不覆盖它）")
-	fmt.Println("→ time.Tick(d) 更糟：拿不到 Ticker 对象，压根没法 Stop")
-	fmt.Println("   文档原话：the underlying Ticker is not recovered by the garbage collector")
+	fmt.Println("  goroutine 数量不能用来判断 timer 是否被回收；这里只展示 Ticker 不会为每个实例创建 goroutine")
+	fmt.Println("→ Go 1.23+ 默认语义同时支持回收无引用的 Timer 和 Ticker（包括 time.Tick 背后的 Ticker）")
+	fmt.Println("→ Stop 用于明确停止 tick，但不会关闭 C；消费循环必须有自己的取消/退出路径")
+	fmt.Println("→ 旧版本或 GODEBUG=asynctimerchan=1 回退模式不能套用这些回收保证")
 }
 
 // ---------------------------------------------------------------------------
@@ -512,10 +512,10 @@ func trapTimeInStruct() {
 		unsafe.Sizeof(r), unsafe.Sizeof(r.CreatedAt))
 
 	fmt.Println("→ time.Time 里有 *Location 指针，所以：")
-	fmt.Println("  · 含 time.Time 的 struct 一定落在 scan span，GC 要扫它（mem.md 1.5）")
+	fmt.Println("  · 若含 time.Time 的 struct 分配到堆上，其指针字段会参与扫描（mem.md#section-1-5）")
 	fmt.Println("  · 海量记录时用 int64 存 Unix 纳秒更省（8 字节 + noscan）")
 	fmt.Println("→ JSON 序列化：time.Time 默认输出 RFC3339Nano，反序列化也只认这个格式")
-	fmt.Println("  自定义格式要实现 MarshalJSON/UnmarshalJSON（json.md 2.1）")
+	fmt.Println("  自定义格式要实现 MarshalJSON/UnmarshalJSON（json.md#topic-9）")
 	fmt.Println("→ 零值判断用 t.IsZero()，不是 t == time.Time{}")
 	fmt.Printf("  零值: IsZero()=%v, 打印=%v\n", time.Time{}.IsZero(), time.Time{})
 	_ = r

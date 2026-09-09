@@ -1,8 +1,78 @@
 # 性能分析：pprof 与 trace
 
+> 定位：从性能症状选择 profile/trace 并验证优化。
+> 前置知识：[测试](test.md)、[GMP 模型](gmp.md)、[内存分配与栈](mem.md)、[GC](gc.md)。
+> 配套示例：[prof/main.go](prof/main.go)（`go run ./prof`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [实战排查路线](#topic-6) → [六种 profile](#topic-1)；深入实现或进阶用法时读 [CPU profile](#topic-2) → [内存 profile](#topic-3) → [goroutine / mutex / block profile](#topic-4) → [execution trace](#topic-5) → [其他工具](#topic-7)。
+
+**篇内导航**
+
+- [实战排查路线](#topic-6)
+- [六种 profile](#topic-1)
+- [CPU profile](#topic-2)
+- [内存 profile](#topic-3)
+- [goroutine / mutex / block profile](#topic-4)
+- [execution trace](#topic-5)
+- [其他工具](#topic-7)
+- [常见面试题](#topic-8)
+
 > 环境：`go version go1.26.3 darwin/amd64`。配套代码：`notes/prof/`——一个故意写了 CPU 热点、内存泄漏、goroutine 泄漏、锁竞争的程序，`go run ./prof` 会把五种 profile 写到 `notes/prof/out/`。本文所有输出都是那份代码的真实运行结果。
 
-## 一、六种 profile
+<a id="topic-6"></a>
+
+## 一、实战排查路线
+
+<a id="section-6-1"></a>
+
+### 1.1 CPU 高
+
+```text
+① GODEBUG=gctrace=1 看 GC 占比 → 高（>20%）就转去查分配
+② go tool pprof -http 看火焰图，找最宽的那块
+③ flat 前几名是 runtime.* → 查 alloc_space（2.3 节）
+④ 定位到函数后 -list 看具体行
+⑤ 优化后用 -base 做差确认
+```
+
+<a id="section-6-2"></a>
+
+### 1.2 内存高 / 疑似泄漏
+
+```text
+① /debug/pprof/heap 抓两次，-base 做差
+② inuse_space 涨 → 真泄漏，看是谁持有（常见：全局 map、cache 无淘汰、slice 截取、context 未 cancel）
+③ inuse 不涨但 RSS 涨 → 看 goroutine 数（每个栈至少 2KB）、heap_released、cgo
+④ 顺手看 inuse_objects：对象数暴涨会拖慢每一轮 GC
+```
+
+<a id="section-6-3"></a>
+
+### 1.3 延迟高但 CPU 不高
+
+```text
+① goroutine profile：goroutine 数是否在涨（泄漏会拖慢调度和 GC 扫描）
+② block profile：在等 channel 还是等锁
+③ mutex profile：哪把锁在被争
+④ trace 的 Scheduler latency profile：是不是根本没被调度上
+⑤ 别忘了外部依赖——很多"Go 慢"最后是数据库/下游慢
+```
+
+<a id="section-6-4"></a>
+
+### 1.4 goroutine 泄漏
+
+```text
+① curl '/debug/pprof/goroutine?debug=1' | head -40   看"N @ 同一个栈"
+② debug=2 看阻塞时长，找卡最久的
+③ 常见根因：无缓冲 channel 没人收 / context 没 cancel / WaitGroup 计数不配平
+   / ticker 消费循环没有取消路径 / HTTP response body 没 Close
+④ 测试里用 go.uber.org/goleak 在 TestMain 里守住（见 test.md 的 TestMain 章节）
+```
+
+<a id="topic-1"></a>
+
+## 二、六种 profile
 
 | profile | 采集什么 | 默认开启 | 采集方式 |
 | --- | --- | --- | --- |
@@ -15,7 +85,9 @@
 
 另外还有 `threadcreate`（很少用）和 `execution trace`（不是 profile，是事件流，见第四节）。
 
-### 1.1 采集方式一：代码里写
+<a id="section-1-1"></a>
+
+### 2.1 采集方式一：代码里写
 
 ```go
 // CPU
@@ -33,7 +105,9 @@ pprof.Lookup("goroutine").WriteTo(f, 1)   // 1 = 人可读文本（栈聚合）
 pprof.Lookup("goroutine").WriteTo(f, 2)   // 2 = 每个 goroutine 一条完整栈
 ```
 
-### 1.2 采集方式二：HTTP 端点（线上标准做法）
+<a id="section-1-2"></a>
+
+### 2.2 采集方式二：HTTP 端点（线上标准做法）
 
 ```go
 import _ "net/http/pprof"    // 注册 /debug/pprof/* 到 DefaultServeMux
@@ -58,11 +132,15 @@ curl 'http://localhost:6060/debug/pprof/'                              # 看有�
 
 1. **只绑 `localhost`**，或者放在单独的管理端口 + 鉴权后面。`/debug/pprof` 暴露到公网等于把源码结构、内存内容和一个 DoS 开关送出去；
 2. 用 `http.NewServeMux` 时 `import _ "net/http/pprof"` **不会**自动注册（它注册到 `DefaultServeMux`），要手工 `mux.HandleFunc("/debug/pprof/", pprof.Index)` 等；
-3. `?seconds=N` 期间程序会被采样，CPU profile 有约 **1-5%** 的开销，可以接受；`trace` 的开销大得多（见 4.3）。
+3. `?seconds=N` 期间程序会被采样，CPU profile 有约 **1-5%** 的开销，可以接受；`trace` 的开销大得多（见 [block profile：查阻塞](#section-4-3)）。
 
-## 二、CPU profile
+<a id="topic-2"></a>
 
-### 2.1 读 `-top` 的两列
+## 三、CPU profile
+
+<a id="section-2-1"></a>
+
+### 3.1 读 `-top` 的两列
 
 ```text
 $ go tool pprof -top -nodecount=12 prof/out/cpu.pprof
@@ -87,7 +165,9 @@ $ go tool pprof -top -cum prof/out/cpu.pprof | grep main
       0     0%      0.09s  5.14%  main.concatSlow
 ```
 
-### 2.2 常用命令
+<a id="section-2-2"></a>
+
+### 3.2 常用命令
 
 ```bash
 go tool pprof -http=:8080 cpu.pprof        # ★ 浏览器：火焰图 / 调用图 / 源码级注解
@@ -102,7 +182,9 @@ go tool pprof -base old.pprof new.pprof    # ★ 两份 profile 做差（优化�
 
 `-http=:8080` 里最有用的三个视图：**Flame Graph**（看占比结构）、**Source**（看具体哪一行）、**Peek**（看调用关系）。
 
-### 2.3 flat 里全是 `runtime.*` 说明什么
+<a id="section-2-3"></a>
+
+### 3.3 flat 里全是 `runtime.*` 说明什么
 
 我第一版的示例程序（`s += ...` 拼接 2000 次）跑出来是这样：
 
@@ -118,12 +200,14 @@ go tool pprof -base old.pprof new.pprof    # ★ 两份 profile 做差（优化�
 这种 profile 的正确读法：
 
 1. `-cum` 看用户代码在哪条链上（`main.concatSlow` cum 5%）；
-2. **转而看 heap profile 的 `alloc_space`**——GC 压力的根因是分配（见 3.2）；
-3. `GODEBUG=gctrace=1` 确认 GC 占比（见 gc.md 2.4）。
+2. **转而看 heap profile 的 `alloc_space`**——GC 压力的根因是分配（见 [排查内存泄漏的标准流程](#section-3-2)）；
+3. `GODEBUG=gctrace=1` 确认 GC 占比（见 [谁在干标记的活：25% + assist](gc.md#section-2-4)）。
 
 **经验规则：flat 前几名是 `runtime.mallocgc`/`gcDrain`/`madvise`/`kevent` 时，别在 CPU profile 上继续挖，去看分配。**
 
-### 2.4 采样原理与盲区
+<a id="section-2-4"></a>
+
+### 3.4 采样原理与盲区
 
 CPU profile 靠 `setitimer(ITIMER_PROF)` 每 10ms 发一次 `SIGPROF`，信号处理函数记录当前栈。三个推论：
 
@@ -131,9 +215,13 @@ CPU profile 靠 `setitimer(ITIMER_PROF)` 每 10ms 发一次 `SIGPROF`，信号�
 - **看不到不消耗 CPU 的等待**：阻塞在 IO、锁、channel 上的时间在 CPU profile 里完全不可见。那是 block/mutex profile 和 trace 的活；
 - `Total samples = 1.74s (82.5%)` 里的百分比是"采样总时长 / wall duration"，**超过 100% 说明多核并行**（我第一版跑出 130%）。
 
-## 三、内存 profile
+<a id="topic-3"></a>
 
-### 3.1 四个视图
+## 四、内存 profile
+
+<a id="section-3-1"></a>
+
+### 4.1 四个视图
 
 heap profile 里有四组数据，`-sample_index` 切换：
 
@@ -142,7 +230,7 @@ heap profile 里有四组数据，`-sample_index` 切换：
 | `inuse_space`（默认） | **当前存活**的字节数 | **内存泄漏** |
 | `inuse_objects` | 当前存活的对象数 | 小对象太多、GC 慢 |
 | `alloc_space` | **累计分配**的字节数 | GC 压力大、分配热点 |
-| `alloc_objects` | 累计分配的对象数 | **分配次数**热点（见 mem.md 4.1） |
+| `alloc_objects` | 累计分配的对象数 | **分配次数**热点（见 [分配次数 > 分配字节数](mem.md#section-4-1)） |
 
 ```text
 $ go tool pprof -top -nodecount=6 prof/out/heap.pprof              # inuse_space
@@ -155,7 +243,9 @@ $ go tool pprof -top -sample_index=alloc_space -nodecount=6 prof/out/heap.pprof
 
 两个视图看到的是**完全不同的问题**：`concatSlow` 分配了 76MB 但都回收了（是 GC 压力问题），`leakMemory` 的 74MB 还活着（是泄漏问题）。
 
-### 3.2 排查内存泄漏的标准流程
+<a id="section-3-2"></a>
+
+### 4.2 排查内存泄漏的标准流程
 
 ```bash
 # ① 隔一段时间抓两次
@@ -172,9 +262,11 @@ go tool pprof -base h1.pprof -list 'leakMemory' h2.pprof
 
 `-base` 是内存排查的核心手段：**绝对值受启动期和缓存影响，增量才说明泄漏**。
 
-如果 `inuse_space` 不涨但 RSS 涨，那不是堆泄漏，去看 gc.md 3.5 的排查表（goroutine 栈、`heap_released`、cgo）。
+如果 `inuse_space` 不涨但 RSS 涨，那不是堆泄漏，去看 [陷阱：RSS 不降就以为泄漏](gc.md#section-3-5) 的排查表（goroutine 栈、`heap_released`、cgo）。
 
-### 3.3 采样率
+<a id="section-3-3"></a>
+
+### 4.3 采样率
 
 `MemProfileRate` 默认 512KB——**平均每分配 512KB 记录一次栈**，不是每次都记。所以：
 
@@ -182,9 +274,13 @@ go tool pprof -base h1.pprof -list 'leakMemory' h2.pprof
 - 要精确（比如写单元测试断言分配量）：`runtime.MemProfileRate = 1`，但开销显著；
 - 只在 `main` 最开头改它才有意义（改之前的分配已经按老速率采样了）。
 
-## 四、goroutine / mutex / block profile
+<a id="topic-4"></a>
 
-### 4.1 goroutine profile：查泄漏
+## 五、goroutine / mutex / block profile
+
+<a id="section-4-1"></a>
+
+### 5.1 goroutine profile：查泄漏
 
 `debug=1` 的文本格式最直观（按栈聚合 + 计数）：
 
@@ -212,7 +308,9 @@ go func() { <-never }()      // 永远不会被关闭（第 181 行）
 
 也可以直接 `kill -QUIT <pid>`（`SIGQUIT`）让进程打印全部 goroutine 栈然后退出——**没有 pprof 端点时的救命手段**。
 
-### 4.2 mutex profile：查锁竞争
+<a id="section-4-2"></a>
+
+### 5.2 mutex profile：查锁竞争
 
 **必须先打开**：`runtime.SetMutexProfileFraction(n)`（n=1 全采，n=5 表示 1/5）。
 
@@ -228,7 +326,9 @@ Type: delay
 - **Type 是 `delay`（等待时间），不是次数**——它回答"竞争让别人等了多久"；
 - **栈顶记在 `Unlock` 上**，因为 runtime 是在解锁、把锁交给下一个等待者时才知道"这个等待者等了多久"。所以要看 cum 那一列找**是哪段业务代码在争这把锁**。
 
-### 4.3 block profile：查阻塞
+<a id="section-4-3"></a>
+
+### 5.3 block profile：查阻塞
 
 `runtime.SetBlockProfileRate(n)`：n 是纳秒阈值，1 = 全采，`1e6` = 只记 1ms 以上。
 
@@ -243,9 +343,13 @@ block 和 mutex 的区别：**block 覆盖所有阻塞**（channel 收发、sele
 
 **生产上两者都不要设成 1**——全采会给每次阻塞记一次栈，开销可观。常用值：`SetMutexProfileFraction(5)` + `SetBlockProfileRate(1e6)`（只关心 1ms 以上）。
 
-## 五、execution trace
+<a id="topic-5"></a>
 
-### 5.1 trace 和 profile 的区别
+## 六、execution trace
+
+<a id="section-5-1"></a>
+
+### 6.1 trace 和 profile 的区别
 
 profile 是**统计采样**（"大概 80% 时间在这里"），trace 是**事件流**（"第 3.21ms 时 G17 在 P2 上开始跑，3.24ms 被 GC 打断"）。
 
@@ -271,7 +375,9 @@ go tool trace prof/out/trace.out          # 打开浏览器
 curl -o t.out 'http://host:6060/debug/pprof/trace?seconds=5'
 ```
 
-### 5.2 `go tool trace` 的六个视图
+<a id="section-5-2"></a>
+
+### 6.2 `go tool trace` 的六个视图
 
 | 视图 | 看什么 |
 | --- | --- |
@@ -284,7 +390,9 @@ curl -o t.out 'http://host:6060/debug/pprof/trace?seconds=5'
 
 **Goroutine analysis 是最被低估的一个**：它把每个 goroutine 的时间拆成 Execution / Network wait / Sync block / Syscall / Scheduler wait / GC，一眼看出"时间花在等什么"。
 
-### 5.3 trace 的代价
+<a id="section-5-3"></a>
+
+### 6.3 trace 的代价
 
 trace 记录**每一个**调度事件、GC 事件、channel 操作，开销远大于 pprof：
 
@@ -294,62 +402,25 @@ trace 记录**每一个**调度事件、GC 事件、channel 操作，开销远�
 
 **用法：怀疑调度/GC/延迟问题时抓 3-5 秒**，别长跑。
 
-## 六、实战排查路线
-
-### 6.1 CPU 高
-
-```text
-① GODEBUG=gctrace=1 看 GC 占比 → 高（>20%）就转去查分配
-② go tool pprof -http 看火焰图，找最宽的那块
-③ flat 前几名是 runtime.* → 查 alloc_space（2.3 节）
-④ 定位到函数后 -list 看具体行
-⑤ 优化后用 -base 做差确认
-```
-
-### 6.2 内存高 / 疑似泄漏
-
-```text
-① /debug/pprof/heap 抓两次，-base 做差
-② inuse_space 涨 → 真泄漏，看是谁持有（常见：全局 map、cache 无淘汰、slice 截取、context 未 cancel）
-③ inuse 不涨但 RSS 涨 → 看 goroutine 数（每个栈至少 2KB）、heap_released、cgo
-④ 顺手看 inuse_objects：对象数暴涨会拖慢每一轮 GC
-```
-
-### 6.3 延迟高但 CPU 不高
-
-```text
-① goroutine profile：goroutine 数是否在涨（泄漏会拖慢调度和 GC 扫描）
-② block profile：在等 channel 还是等锁
-③ mutex profile：哪把锁在被争
-④ trace 的 Scheduler latency profile：是不是根本没被调度上
-⑤ 别忘了外部依赖——很多"Go 慢"最后是数据库/下游慢
-```
-
-### 6.4 goroutine 泄漏
-
-```text
-① curl '/debug/pprof/goroutine?debug=1' | head -40   看"N @ 同一个栈"
-② debug=2 看阻塞时长，找卡最久的
-③ 常见根因：无缓冲 channel 没人收 / context 没 cancel / WaitGroup 计数不配平
-   / time.Ticker 没 Stop / HTTP response body 没 Close
-④ 测试里用 go.uber.org/goleak 在 TestMain 里守住（见 test.md 5.1）
-```
+<a id="topic-7"></a>
 
 ## 七、其他工具
 
 | 工具 | 用途 |
 | --- | --- |
-| `GODEBUG=gctrace=1` | 每轮 GC 一行日志（见 gc.md 2.4） |
+| `GODEBUG=gctrace=1` | 每轮 GC 一行日志（见 [谁在干标记的活：25% + assist](gc.md#section-2-4)） |
 | `GODEBUG=inittrace=1` | 每个包 init 的耗时和分配（查启动慢） |
 | `GODEBUG=schedtrace=1000` | 每秒打印调度器状态（P/M/G 数量、队列长度） |
 | `GODEBUG=scheddetail=1` | 配合 schedtrace，输出每个 P/M/G 的细节 |
 | `kill -QUIT <pid>` | 打印全部 goroutine 栈并退出（没有 pprof 端点时的救命手段） |
-| `runtime/metrics` | 112 个运行时指标，采集不 STW（见 gc.md 1.4） |
-| `benchstat` | benchmark 结果的统计对比（见 test.md 2.3） |
-| `go build -gcflags='-m'` | 逃逸分析和内联决策（见 mem.md 2.1） |
+| `runtime/metrics` | 112 个运行时指标，采集不 STW（见 [runtime/metrics：现在应该用这个](gc.md#section-1-4)） |
+| `benchstat` | benchmark 结果的统计对比（见 [常见的 benchmark 写错](test.md#section-2-3)） |
+| `go build -gcflags='-m'` | 逃逸分析和内联决策（见 [唯一的判定原则](mem.md#section-2-1)） |
 | `go tool objdump` / `-gcflags=-S` | 看汇编 |
 | `dlv`（delve） | 调试器；`dlv attach <pid>` 可以现场看变量 |
 | **PGO**（1.21+） | 用 CPU profile 指导编译优化，见下 |
+
+<a id="section-7-1"></a>
 
 ### 7.1 PGO（profile-guided optimization）
 
@@ -368,49 +439,51 @@ go build ./cmd/myapp
 
 注意：profile 要有代表性（用生产流量，不是压测），且随代码演进要定期更新。
 
+<a id="topic-8"></a>
+
 ## 八、常见面试题
 
 **1. Go 有哪几种 profile？哪些默认不开？**
-cpu、heap、goroutine、allocs、mutex、block（外加 threadcreate 和 execution trace）。**mutex 和 block 默认关闭**，要 `SetMutexProfileFraction`/`SetBlockProfileRate` 显式打开（见 1.1）。
+cpu、heap、goroutine、allocs、mutex、block（外加 threadcreate 和 execution trace）。**mutex 和 block 默认关闭**，要 `SetMutexProfileFraction`/`SetBlockProfileRate` 显式打开（见 [采集方式一：代码里写](#section-1-1)）。
 
 **2. `flat` 和 `cum` 的区别？**
-`flat` 是函数自身消耗，`cum` 含它调用的所有函数。找"烧 CPU 的代码"看 flat，找"贵的调用链"看 cum。叶子函数两者接近，框架函数 flat≈0 而 cum 很大（见 2.1）。
+`flat` 是函数自身消耗，`cum` 含它调用的所有函数。找"烧 CPU 的代码"看 flat，找"贵的调用链"看 cum。叶子函数两者接近，框架函数 flat≈0 而 cum 很大（见 [读 `-top` 的两列](#section-2-1)）。
 
 **3. CPU profile 的原理？有什么盲区？**
-`setitimer(ITIMER_PROF)` 每 10ms 发 `SIGPROF`，信号处理函数记录当前栈，采样率 100Hz。盲区：**不消耗 CPU 的等待完全看不见**（IO、锁、channel 阻塞），短于 1 秒的行为测不准（见 2.4）。
+`setitimer(ITIMER_PROF)` 每 10ms 发 `SIGPROF`，信号处理函数记录当前栈，采样率 100Hz。盲区：**不消耗 CPU 的等待完全看不见**（IO、锁、channel 阻塞），短于 1 秒的行为测不准（见 [采样原理与盲区](#section-2-4)）。
 
 **4. CPU profile 里 flat 全是 `runtime.madvise`/`kevent` 说明什么？**
-程序被 GC 和调度支配。应该转去看 heap 的 `alloc_space`（分配是 GC 压力的根因）和 `GODEBUG=gctrace=1`，而不是继续在 CPU profile 上挖（见 2.3）。
+程序被 GC 和调度支配。应该转去看 heap 的 `alloc_space`（分配是 GC 压力的根因）和 `GODEBUG=gctrace=1`，而不是继续在 CPU profile 上挖（见 [flat 里全是 `runtime.*` 说明什么](#section-2-3)）。
 
 **5. heap profile 的四个视图分别查什么？**
-`inuse_space` 查泄漏、`inuse_objects` 查小对象过多、`alloc_space` 查 GC 压力、`alloc_objects` 查分配次数热点。前两个是"现在还活着"，后两个是"历史累计"——**它们经常指向完全不同的问题**（见 3.1）。
+`inuse_space` 查泄漏、`inuse_objects` 查小对象过多、`alloc_space` 查 GC 压力、`alloc_objects` 查分配次数热点。前两个是"现在还活着"，后两个是"历史累计"——**它们经常指向完全不同的问题**（见 [四个视图](#section-3-1)）。
 
 **6. 怎么用 pprof 定位内存泄漏？**
-隔十分钟抓两次 heap，用 **`-base h1.pprof h2.pprof` 做差**只看增量，然后 `-list` 到具体行。绝对值受启动期和缓存干扰，增量才说明问题（见 3.2）。
+隔十分钟抓两次 heap，用 **`-base h1.pprof h2.pprof` 做差**只看增量，然后 `-list` 到具体行。绝对值受启动期和缓存干扰，增量才说明问题（见 [排查内存泄漏的标准流程](#section-3-2)）。
 
 **7. `MemProfileRate` 是什么？为什么 heap profile 的数字不精确？**
-默认 512KB——平均每分配 512KB 才记一次栈，数字是统计估计（runtime 做了缩放补偿）。要精确得设成 1，但开销大，且必须在 `main` 最开头设（见 3.3）。
+默认 512KB——平均每分配 512KB 才记一次栈，数字是统计估计（runtime 做了缩放补偿）。要精确得设成 1，但开销大，且必须在 `main` 最开头设（见 [采样率](#section-3-3)）。
 
 **8. 怎么发现 goroutine 泄漏？**
-`/debug/pprof/goroutine?debug=1` 看有没有"N @ 同一个栈"；`debug=2` 看阻塞时长。常见根因：无缓冲 channel 无人接收、context 未 cancel、WaitGroup 不配平、Ticker 未 Stop、response body 未 Close。测试里用 `goleak`（见 4.1、6.4）。
+`/debug/pprof/goroutine?debug=1` 看有没有"N @ 同一个栈"；`debug=2` 看阻塞时长。常见根因：无缓冲 channel 无人接收、context 未 cancel、WaitGroup 不配平、Ticker 未 Stop、response body 未 Close。测试里用 `goleak`（见 [goroutine profile：查泄漏](#section-4-1)、[goroutine 泄漏](#section-6-4)）。
 
 **9. mutex profile 为什么把栈记在 `Unlock` 上？**
-runtime 只在解锁、把锁移交给下一个等待者时才知道"这个等待者等了多久"，所以延迟归属记在 `Unlock` 处。要找争锁的业务代码得看 cum 列。另外它的单位是**等待时间（delay）而不是次数**（见 4.2）。
+runtime 只在解锁、把锁移交给下一个等待者时才知道"这个等待者等了多久"，所以延迟归属记在 `Unlock` 处。要找争锁的业务代码得看 cum 列。另外它的单位是**等待时间（delay）而不是次数**（见 [mutex profile：查锁竞争](#section-4-2)）。
 
 **10. block profile 和 mutex profile 的区别？**
-block 覆盖所有阻塞（channel 收发、select、`WaitGroup.Wait`、锁），mutex 只覆盖锁竞争。"延迟高但 CPU 不高"优先看 block（见 4.3）。
+block 覆盖所有阻塞（channel 收发、select、`WaitGroup.Wait`、锁），mutex 只覆盖锁竞争。"延迟高但 CPU 不高"优先看 block（见 [block profile：查阻塞](#section-4-3)）。
 
 **11. trace 和 pprof 的区别？什么时候用 trace？**
-pprof 是统计采样（谁占比高），trace 是完整事件流（什么时刻发生了什么）。查 P99 延迟、GC 干扰、调度延迟、并行度不足用 trace。代价是 10-30% 吞吐下降，只抓 3-5 秒（见 5.1、5.3）。
+pprof 是统计采样（谁占比高），trace 是完整事件流（什么时刻发生了什么）。查 P99 延迟、GC 干扰、调度延迟、并行度不足用 trace。代价是 10-30% 吞吐下降，只抓 3-5 秒（见 [trace 和 profile 的区别](#section-5-1)、[trace 的代价](#section-5-3)）。
 
 **12. `go tool trace` 里最有用的视图是哪个？**
-**Goroutine analysis**——把每个 goroutine 的时间拆成 Execution / Network wait / Sync block / Syscall / Scheduler wait / GC，一眼看出时间花在等什么。其次是 Scheduler latency profile 和 View trace（见 5.2）。
+**Goroutine analysis**——把每个 goroutine 的时间拆成 Execution / Network wait / Sync block / Syscall / Scheduler wait / GC，一眼看出时间花在等什么。其次是 Scheduler latency profile 和 View trace（见 [`go tool trace` 的六个视图](#section-5-2)）。
 
 **13. 线上暴露 `/debug/pprof` 有什么风险？**
-泄漏源码结构和内存内容（heap profile 里可能有明文数据）、提供 DoS 入口（`?seconds=3600`）。必须绑 localhost 或放在鉴权后的管理端口。另外注意它注册在 `DefaultServeMux`，用自定义 mux 时要手工注册（见 1.2）。
+泄漏源码结构和内存内容（heap profile 里可能有明文数据）、提供 DoS 入口（`?seconds=3600`）。必须绑 localhost 或放在鉴权后的管理端口。另外注意它注册在 `DefaultServeMux`，用自定义 mux 时要手工注册（见 [采集方式二：HTTP 端点（线上标准做法）](#section-1-2)）。
 
 **14. 没有 pprof 端点、进程卡住了怎么办？**
-`kill -QUIT <pid>`（SIGQUIT）让 runtime 打印**全部 goroutine 栈**然后退出。这是 Go 内置的最后手段。想不退出可以 `dlv attach <pid>`（见 4.1、7）。
+`kill -QUIT <pid>`（SIGQUIT）让 runtime 打印**全部 goroutine 栈**然后退出。这是 Go 内置的最后手段。想不退出可以 `dlv attach <pid>`（见 [goroutine profile：查泄漏](#section-4-1)、7）。
 
 **15. PGO 是什么？怎么用？**
-1.21 起支持 profile-guided optimization：把有代表性的 CPU profile 命名为 `default.pgo` 放在 main 包目录下，`go build` 自动启用，用它指导内联和代码布局，官方数据 2-7% CPU 提升。profile 要来自生产流量并定期更新（见 7.1）。
+1.21 起支持 profile-guided optimization：把有代表性的 CPU profile 命名为 `default.pgo` 放在 main 包目录下，`go build` 自动启用，用它指导内联和代码布局，官方数据 2-7% CPU 提升。profile 要来自生产流量并定期更新（见 [PGO（profile-guided optimization）](#section-7-1)）。

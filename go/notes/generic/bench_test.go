@@ -4,7 +4,7 @@ import "testing"
 
 // go test -bench . -benchmem ./generic
 //
-// 对应 notes/generic.md 2.4（字典间接调用）、2.6（性能实测）、3.11（泛型不是性能银弹）。
+// 对应 notes/generic.md 的字典间接调用、性能实测、泛型不是性能银弹等小节。
 //
 // 看内联决策（泛型版函数体一大就彻底失去优化机会）：
 //	go test -gcflags=-m -bench=xxx ./generic 2>&1 | grep -E 'inline.*sum'

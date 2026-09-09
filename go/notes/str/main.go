@@ -190,7 +190,7 @@ func basicBuilder() {
 	fmt.Printf("  Len=%d Cap=%d\n", sb.Len(), sb.Cap())
 
 	fmt.Println("→ Builder 的 String() 是零拷贝的（unsafe.String 直接指向内部 buf）")
-	fmt.Println("→ 所以 String() 之后再 Write 会先复制一份 buf（copyCheck），避免改到已返回的字符串")
+	fmt.Println("→ String() 之后再 Write 只追加后缀，容量不足才扩容复制；copyCheck 检查的是 Builder 自身有没有被拷贝")
 	fmt.Println("→ Builder 不能拷贝：内部有 addr 字段做自引用检查，拷贝后 Write 会 panic")
 
 	func() {

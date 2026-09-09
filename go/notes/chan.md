@@ -1,8 +1,25 @@
 # Channel
 
+> 定位：Channel 收发、关闭与并发协作。
+> 前置知识：[函数](func.md)。
+> 配套示例：[chan/main.go](chan/main.go)（`go run ./chan`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [常见陷阱](#topic-3)；深入实现或进阶用法时读 [底层原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [底层原理](#topic-2)
+- [常见陷阱](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3`。底层结构与流程以该版本源码为准：`runtime/chan.go`（hchan、发送/接收/关闭）、`runtime/select.go`（selectgo）、`cmd/compile/internal/walk/select.go`（select 的编译期降级）、`runtime/runtime2.go`（sudog）。不同版本行内逻辑略有调整（如 Go 1.23 起 timer channel 改为由 runtime timer 直接驱动），但核心模型多年未变。
 
+<a id="topic-1"></a>
+
 ## 一、基础使用
+
+<a id="section-1-1"></a>
 
 ### 1.1 声明与初始化
 
@@ -16,6 +33,8 @@ done := make(chan struct{})  // 只做信号通知，元素类型用空结构体
 
 - `chan T` 变量本身就是**一个指针**（指向运行时的 `hchan`），`unsafe.Sizeof(ch) == 8`（64 位）。因此 channel 传参、赋值只拷贝这个指针，多个变量共享同一个 channel，天然是"引用语义"。
 - **必须 `make` 才能用**：`nil` channel 不是"空 channel"，它是永久阻塞的 channel。
+
+<a id="section-1-2"></a>
 
 ### 1.2 发送、接收、关闭
 
@@ -35,6 +54,8 @@ close(ch)       // 关闭
 | close | 正常                       | 正常           | **panic**    | **panic**                |
 
 只需记住一句：**"nil 全阻塞，close 后写和再 close 都 panic，读永远安全"**。
+
+<a id="section-1-3"></a>
 
 ### 1.3 comma-ok 接收与关闭语义
 
@@ -56,6 +77,8 @@ v, ok := <-ch          // 0, false —— 读空之后才是"关闭"语义
 
 因此 `ok == false` 的含义精确地是"**关闭且已读空**"，而不是"关闭了"。
 
+<a id="section-1-4"></a>
+
 ### 1.4 range 遍历 channel
 
 ```go
@@ -65,7 +88,9 @@ for v := range ch {   // 等价于 for { v, ok := <-ch; if !ok { break }; ... }
 ```
 
 - `range` 会一直读到 channel **被关闭且读空**才退出，只 `close` 不写入也能正常退出循环。
-- **没有人 `close`，`range` 就永远不会结束**（见 3.7），这是 goroutine 泄漏的最常见来源之一。
+- **没有人 `close`，`range` 就永远不会结束**（见 [for range 不会自己结束](#section-3-7)），这是 goroutine 泄漏的最常见来源之一。
+
+<a id="section-1-5"></a>
 
 ### 1.5 单向 channel
 
@@ -90,7 +115,9 @@ consumer(ch)
 ```
 
 - 双向 → 单向是**隐式允许**的赋值转换；单向 → 双向**不允许**，单向 channel 之间也不能互转。
-- 单向类型是**编译期的接口约束**，运行时仍是同一个 `hchan`，零开销。它的价值是把"谁负责发送、谁负责关闭"写进函数签名里（对应 3.5 的原则）。
+- 单向类型是**编译期的接口约束**，运行时仍是同一个 `hchan`，零开销。它的价值是把"谁负责发送、谁负责关闭"写进函数签名里（对应 [只有发送方能 close，接收方永远不要 close](#section-3-5) 的原则）。
+
+<a id="section-1-6"></a>
 
 ### 1.6 len 与 cap
 
@@ -106,7 +133,9 @@ var n chan int
 fmt.Println(len(n), cap(n))   // 0 0  —— nil channel 不 panic，返回 0
 ```
 
-`len`/`cap` 只反映缓冲区，**不包含阻塞在 `sendq`/`recvq` 上的等待者**，而且读出来的瞬间就可能过期，只适合做监控和调试，不能用来做控制流判断（见 3.10）。
+`len`/`cap` 只反映缓冲区，**不包含阻塞在 `sendq`/`recvq` 上的等待者**，而且读出来的瞬间就可能过期，只适合做监控和调试，不能用来做控制流判断（见 [用 len/cap 做控制流是竞态的](#section-3-10)）。
+
+<a id="section-1-7"></a>
 
 ### 1.7 select 多路复用
 
@@ -121,9 +150,9 @@ case <-time.After(time.Second):
 }
 ```
 
-- **多个 case 同时就绪时，随机选一个**（伪随机，实测均匀：两路都就绪时 10 万次约 49914 : 50086，见 2.8），因此 case 的书写顺序**不构成优先级**。
+- **多个 case 同时就绪时，随机选一个**（伪随机，实测均匀：两路都就绪时 10 万次约 49914 : 50086，见 [select 的实现：编译期降级 + selectgo 三趟扫描](#section-2-8)），因此 case 的书写顺序**不构成优先级**。
 - 所有 case 都没就绪时：有 `default` 立即走 `default`（select 变成非阻塞），没有 `default` 就阻塞等待第一个就绪的 case。
-- `case` 里的 channel 表达式和发送值在进入等待**之前**就会被求值一次——这就是 `time.After` 每次执行 select 都新建一个 timer 的原因（见 3.8）。
+- `case` 里的 channel 表达式和发送值在进入等待**之前**就会被求值一次——这就是 `time.After` 每次执行 select 都新建一个 timer 的原因（见 [select + time.After 的定时器开销](#section-3-8)）。
 
 三种常用写法：
 
@@ -155,7 +184,11 @@ for {
 }
 ```
 
+<a id="section-1-8"></a>
+
 ### 1.8 常用并发模式
+
+本节集中介绍信号通知、任务分发与管道等组合方式。关闭责任与退出路径先查 [关闭权](#section-3-5)、[多发送者](#section-3-6)、[关闭顺序](#section-3-15)；超时控制的定时器语义见 [time](time.md#section-2-2)。
 
 **① 信号通知 / 广播退出**——利用"关闭后所有接收者立即返回"实现一对多广播：
 
@@ -263,7 +296,11 @@ func doAsync() <-chan Result {
 }
 ```
 
+<a id="topic-2"></a>
+
 ## 二、底层原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 hchan：channel 的运行时结构
 
@@ -289,9 +326,9 @@ type hchan struct {
 
 四个要点：
 
-1. **channel 不是无锁结构**。`hchan.lock` 是一把运行时互斥锁，所有可能修改状态的操作都在锁内完成。只有"非阻塞且注定失败"的判断走无锁快路径（见 2.3）。
+1. **channel 不是无锁结构**。`hchan.lock` 是一把运行时互斥锁，所有可能修改状态的操作都在锁内完成。只有"非阻塞且注定失败"的判断走无锁快路径（见 [发送：chansend 的四条路径](#section-2-3)）。
 2. **buf 是环形队列**，`sendx`/`recvx` 各自单调前进并回绕，所以 FIFO 顺序有严格保证：**channel 里的数据顺序 = 发送完成的顺序**。
-3. **`dataqsiz == 0` 就是无缓冲 channel**，此时 `buf` 不指向真实数据（只用作 race detector 的同步地址），数据永远在两个 goroutine 的栈之间直接拷贝（见 2.5）。
+3. **`dataqsiz == 0` 就是无缓冲 channel**，此时 `buf` 不指向真实数据（只用作 race detector 的同步地址），数据永远在两个 goroutine 的栈之间直接拷贝（见 [sendDirect / recvDirect：绕过缓冲区的直接拷贝](#section-2-5)）。
 4. **`elemsize` 是 `uint16`**，`makechan` 里显式检查 `elem.Size_ >= 1<<16` 就 `throw`，所以元素类型大小不能达到 64KB。大对象应该传指针。
 
 创建（`makechan`，`chan.go:75`）按元素是否含指针分三种分配策略：
@@ -311,6 +348,8 @@ default:                    // 元素含指针 → buf 单独分配，带类型�
 ```
 
 `make(chan T, n)` 一定发生**堆分配**（channel 要跨 goroutine 共享，逃逸分析必然判定逃逸），所以高频创建 channel 是有成本的。
+
+<a id="section-2-2"></a>
 
 ### 2.2 sudog 与 waitq：谁在等，等什么
 
@@ -350,6 +389,8 @@ if sgp.isSelect {
 
 翻译成人话：**缓冲区里还有数据，就不可能有人在等着收；缓冲区还没满，就不可能有人在等着发。** 这条不变量是后面所有路径判断的基础。
 
+<a id="section-2-3"></a>
+
 ### 2.3 发送：chansend 的四条路径
 
 `c <- v` 由编译器翻译成 `chansend1` → `chansend(c, ep, true, pc)`（`chan.go:160`/`176`）。
@@ -379,7 +420,7 @@ if !block && c.closed == 0 && full(c) {
 
 它读两个字（`c.closed` 和 `full(c)`）都不加锁。源码里有很长一段注释论证这个无锁读的正确性：因为**已关闭的 channel 不可能从"可发送"变回"不可发送"**，所以即使两次读之间发生了 close，也一定存在一个"既未关闭又不可发送"的时刻，返回 `false` 就是在报告那个时刻的状态——这对非阻塞操作是合法答案。
 
-**路径 ① 是最重要的优化**：有等待的接收者时，值**绕过缓冲区**直接送到接收者（`send`，`chan.go:318`）。结合 2.2 的不变量，这条路对有缓冲 channel 只在缓冲区为空时才可能命中。
+**路径 ① 是最重要的优化**：有等待的接收者时，值**绕过缓冲区**直接送到接收者（`send`，`chan.go:318`）。结合 [sudog 与 waitq：谁在等，等什么](#section-2-2) 的不变量，这条路对有缓冲 channel 只在缓冲区为空时才可能命中。
 
 **路径 ④ 的唤醒后检查**（`chan.go:295`）解释了一个常见困惑："发送时另一个 goroutine 把 channel 关了会怎样"：
 
@@ -394,6 +435,8 @@ if closed {
 阻塞中的发送者被 `close` 唤醒时 `success == false`，于是**在唤醒点 panic**。也就是说 `send on closed channel` 有两个触发点：进入时就已关闭，以及阻塞期间被关闭。
 
 另外注意 `gopark` 之后有一行 `KeepAlive(ep)`：`sudog.elem` 指向发送者的栈对象，但 sudog 不是 GC 的栈扫描根，必须显式保活到接收者拷走数据为止。
+
+<a id="section-2-4"></a>
 
 ### 2.4 接收：chanrecv 的四条路径
 
@@ -439,6 +482,8 @@ if c.dataqsiz == 0 {
 
 有缓冲 channel 满了、且有发送者在排队时，接收者拿走的是**队头的旧数据**，阻塞发送者的值被放到**队尾**——由于队列是满的，队头和队尾恰好是同一个槽位，一次拷贝就完成了"出队 + 入队"。这保证了即使中间经历了阻塞，**FIFO 顺序也不会被打乱**。
 
+<a id="section-2-5"></a>
+
 ### 2.5 sendDirect / recvDirect：绕过缓冲区的直接拷贝
 
 无缓冲 channel（以及缓冲区为空时命中等待者的有缓冲 channel）的数据传递是**从一个 goroutine 的栈直接拷到另一个 goroutine 的栈**（`chan.go:392`/`405`）：
@@ -463,6 +508,8 @@ func sendDirect(t *_type, sg *sudog, src unsafe.Pointer) {
 
 拷贝的是**元素的完整值**，不是引用。传 1KB 的 struct 就要拷 1KB（有缓冲则拷两遍），所以大对象走 channel 应该传指针，代价是要自己保证所有权移交后不再触碰原对象。
 
+<a id="section-2-6"></a>
+
 ### 2.6 close：一次性唤醒所有等待者
 
 `closechan`（`chan.go:414`）：
@@ -486,6 +533,8 @@ unlock
 
 `close` 是**只能 0→1 的单向操作**，channel 无法重新打开，这也是 2.4 无锁快路径推理成立的前提。
 
+<a id="section-2-7"></a>
+
 ### 2.7 阻塞与唤醒：挂起的是 G，不是线程
 
 channel 阻塞用的是 `gopark` / `goready`，不是操作系统级阻塞：
@@ -505,6 +554,8 @@ channel 阻塞用的是 `gopark` / `goready`，不是操作系统级阻塞：
 | `select`                                           | 阻塞在 select 上                     |
 
 看到 `(nil chan)` 就可以直接定位到"channel 忘了 make"或"select 里的 channel 变量被置 nil 后没有其他可用 case"。
+
+<a id="section-2-8"></a>
 
 ### 2.8 select 的实现：编译期降级 + selectgo 三趟扫描
 
@@ -551,6 +602,8 @@ pass 3（select.go:360）—— 遍历所有 sudog：命中的那个记为结果
 
 由此可以量化 select 的成本：`selectgo` 一次要做**一次洗牌 + 一次堆排序 + 加 n 把锁 + 最坏 n 次入队和 n 次出队**。所以热点循环里的 select 分支数不宜太多，能用普通收发就别套 select。
 
+<a id="section-2-9"></a>
+
 ### 2.9 内存模型：channel 提供的 happens-before 保证
 
 channel 不只是数据搬运，它同时是**同步原语**。Go 内存模型给出四条保证：
@@ -575,7 +628,9 @@ go func() {
 fmt.Println(data)           // ④ 保证能看到 ①，无需额外加锁
 ```
 
-反过来，第 3 条也解释了 3.11 的陷阱：无缓冲 channel 的发送返回，只保证"对方取走了值"，**不保证对方处理完了**。要等处理完必须再收一个回执。
+反过来，第 3 条也解释了 [无缓冲 channel 的"发送成功"不代表"处理完成"](#section-3-11) 的陷阱：无缓冲 channel 的发送返回，只保证"对方取走了值"，**不保证对方处理完了**。要等处理完必须再收一个回执。
+
+<a id="section-2-10"></a>
 
 ### 2.10 无缓冲 vs 有缓冲：本质区别
 
@@ -590,6 +645,8 @@ fmt.Println(data)           // ④ 保证能看到 ①，无需额外加锁
 
 选型原则：**默认用无缓冲**，因为它的同步语义更强、更容易推理，出问题时立刻阻塞暴露而不是悄悄积压。只有明确需要吸收突发、或需要打破"生产者必须等消费者"的耦合时，才加缓冲，而且容量要有具体依据（例如"就是 worker 数"、"就是并发上限"），不要随手写 100。
 
+<a id="section-2-11"></a>
+
 ### 2.11 timer channel：Go 1.23+ 的特殊 hchan
 
 `time.Timer`/`time.Ticker`/`time.After` 返回的 channel 在 `hchan` 里带一个非 nil 的 `timer` 字段，运行时对它做了特殊处理：
@@ -603,6 +660,8 @@ fmt.Println(data)           // ④ 保证能看到 ①，无需额外加锁
 
 - `chanrecv`/`empty`/`selectgo` 在遇到 `c.timer != nil` 时会调用 `c.timer.maybeRunChan(c)`，也就是**在读之前顺便推进一下定时器**，让"到点了但 timer goroutine 还没被调度"的窗口尽可能小。
 - 因此不要对 timer channel 用 `len`/`cap` 判断"是否已到期"，唯一正确的方式是收/select。
+
+<a id="section-2-12"></a>
 
 ### 2.12 关键源码索引
 
@@ -628,7 +687,11 @@ fmt.Println(data)           // ④ 保证能看到 ①，无需额外加锁
 | select 编译期降级               | `cmd/compile/internal/walk/select.go:33`  |
 | `sudog`                         | `runtime/runtime2.go:406`                 |
 
+<a id="topic-3"></a>
+
 ## 三、常见陷阱
+
+<a id="section-3-1"></a>
 
 ### 3.1 向已关闭的 channel 发送直接 panic
 
@@ -647,7 +710,9 @@ if !isClosed(ch) {  // 这里判断"没关"
 }
 ```
 
-Go 也**没有提供**"判断 channel 是否已关闭"的 API，这是有意的设计——正确做法是从架构上保证不会发生（见 3.5、3.6），而不是靠检查。
+Go 也**没有提供**"判断 channel 是否已关闭"的 API，这是有意的设计——正确做法是从架构上保证不会发生（见 [只有发送方能 close，接收方永远不要 close](#section-3-5)、[多个发送者时如何安全关闭](#section-3-6)），而不是靠检查。
+
+<a id="section-3-2"></a>
 
 ### 3.2 重复 close 与 close(nil) 都 panic
 
@@ -668,6 +733,8 @@ type Stopper struct {
 func (s *Stopper) Stop() { s.once.Do(func() { close(s.done) }) } // 调多少次都安全
 ```
 
+<a id="section-3-3"></a>
+
 ### 3.3 nil channel 永久阻塞——既是坑也是特性
 
 ```go
@@ -684,7 +751,7 @@ s := &Server{}     // done 是 nil！
 <-s.done           // 永久阻塞，而且只在运行时才暴露
 ```
 
-但 `select` 里的 nil channel 有正当用途：由于 `selectgo` 会**跳过 nil channel 的 case**（2.8），把变量置 nil 就等于**动态关掉这条分支**。这是"两路输入，谁先耗尽就不再监听谁"的标准写法：
+但 `select` 里的 nil channel 有正当用途：由于 `selectgo` 会**跳过 nil channel 的 case**（[select 的实现：编译期降级 + selectgo 三趟扫描](#section-2-8)），把变量置 nil 就等于**动态关掉这条分支**。这是"两路输入，谁先耗尽就不再监听谁"的标准写法：
 
 ```go
 for ch1 != nil || ch2 != nil {
@@ -706,6 +773,8 @@ for ch1 != nil || ch2 != nil {
 ```
 
 如果不置 nil，已关闭的 channel 会**一直立即就绪**并返回零值，select 变成 100% CPU 的忙循环。
+
+<a id="section-3-4"></a>
 
 ### 3.4 goroutine 泄漏：没有接收者的发送
 
@@ -758,6 +827,8 @@ pprof.Lookup("goroutineleak").WriteTo(os.Stdout, 1)
 
 它的判定原理很聪明：借 GC 的可达性分析，如果一个 goroutine 阻塞在 channel 上（`chan send`/`chan receive`/`select`），而它等待的那个 channel 已经**不可达**（没有任何存活对象引用它，因此永远不会有人来收发），那这个 goroutine 就**永远不可能被唤醒**，判定为泄漏；`select (no cases)` 和 nil channel 上的阻塞则是定义上必然泄漏（`runtime/mgc.go` 的 `isMaybeRunnable`）。注意 `Count()` 要在 `WriteTo` 触发过一次 leak GC 之后才有值。未开启该实验时 `pprof.Lookup("goroutineleak")` 返回 `nil`，直接调用会 panic。
 
+<a id="section-3-5"></a>
+
 ### 3.5 只有发送方能 close，接收方永远不要 close
 
 ```go
@@ -768,7 +839,9 @@ func consume(ch chan int) {
 }
 ```
 
-原则：**channel 的关闭权归唯一的发送方**。用单向类型把这条原则写进签名里（1.5）——接收方拿到的是 `<-chan T`，`close` 直接编译不过，从"运行时 panic"变成"编译期错误"。
+原则：**channel 的关闭权归唯一的发送方**。用单向类型把这条原则写进签名里（[单向 channel](#section-1-5)）——接收方拿到的是 `<-chan T`，`close` 直接编译不过，从"运行时 panic"变成"编译期错误"。
+
+<a id="section-3-6"></a>
 
 ### 3.6 多个发送者时如何安全关闭
 
@@ -801,7 +874,9 @@ for i := 0; i < N; i++ {
 }
 ```
 
-要点：**关闭信号和数据分开走两个 channel**。`done`/`ctx.Done()` 只被关闭、从不写入，所以"多方触发关闭"用 `sync.Once` 就能收口（3.2）；而数据 channel 有多个写者时，最简单的正确做法是**根本不关它**——channel 没有引用后会被 GC 回收，不关不会泄漏资源。
+要点：**关闭信号和数据分开走两个 channel**。`done`/`ctx.Done()` 只被关闭、从不写入，所以"多方触发关闭"用 `sync.Once` 就能收口（[重复 close 与 close(nil) 都 panic](#section-3-2)）；而数据 channel 有多个写者时，最简单的正确做法是**根本不关它**——channel 没有引用后会被 GC 回收，不关不会泄漏资源。
+
+<a id="section-3-7"></a>
 
 ### 3.7 for range 不会自己结束
 
@@ -815,43 +890,34 @@ for v := range ch {   // 打印 1 2 3 之后**永久阻塞**，不是正常结�
 
 `range` 的退出条件是"关闭且读空"，不是"读空"。要么 `close(ch)`，要么别用 `range`（改成读固定次数，或 select + 退出条件）。
 
+<a id="section-3-8"></a>
+
 ### 3.8 select + time.After 的定时器开销
 
-```go
-// 每次循环都新建一个 Timer，1 小时内谁都不会被回收
-for {
-    select {
-    case v := <-ch:
-        use(v)
-    case <-time.After(time.Hour):   // ← 每轮循环 new 一个 timer
-        return
-    }
-}
-```
+`time.After` 在每次求值时都会创建定时器。高频 select 循环中，即使本轮走的是业务 case，这次创建也已发生。Go 1.23+ 默认语义允许 GC 回收无引用的定时器，但不能消除反复创建的分配成本。
 
-`time.After` 创建的 timer 在到期前**不会被 GC**（它被 runtime 的 timer 堆引用着），高频循环里会堆积大量 timer，吃内存也吃 timer 堆的调整开销。正确做法是复用一个 `Timer`：
+下面实现的是“每处理完一条消息后重新计算空闲超时”，而不是整个任务的总时限：
 
 ```go
 t := time.NewTimer(time.Hour)
 defer t.Stop()
 for {
-    if !t.Stop() {        // 复用前先停掉并排空
-        select {
-        case <-t.C:
-        default:
-        }
-    }
-    t.Reset(time.Hour)
     select {
-    case v := <-ch:
+    case v, ok := <-ch:
+        if !ok {
+            return
+        }
         use(v)
+        t.Reset(time.Hour) // Go 1.23+ 默认语义，不需要 Stop + drain
     case <-t.C:
         return
     }
 }
 ```
 
-Go 1.23+ 修正了 `Timer`/`Ticker` 的 GC 和 `Reset` 语义（未被引用的 timer 可以被回收，`Reset`/`Stop` 后不会再收到旧值），所以在新版本上 `time.After` 的泄漏危害小了很多，但**在循环里复用 Timer 依然是更省的写法**。
+总超时应只设置一次，不在业务 case 中 Reset。旧版或回退模式下的回收与重置规则统一见 [Go 1.23 的三个变化](time.md#section-2-2)；本仓库按 `go.mod` 的 Go 1.26.3 默认行为运行。
+
+<a id="section-3-9"></a>
 
 ### 3.9 default 会让 select 变成忙轮询
 
@@ -867,6 +933,8 @@ for {
 ```
 
 `default` 的语义是"现在没就绪就别等"，放在 `for` 里就是自旋。需要"等到有数据"就**去掉 default**；确实需要轮询就加退出条件或退避（`time.Sleep`）；需要同时兼顾多个事件源就把它们都写成 case。
+
+<a id="section-3-10"></a>
 
 ### 3.10 用 len/cap 做控制流是竞态的
 
@@ -891,6 +959,8 @@ default:
 }
 ```
 
+<a id="section-3-11"></a>
+
 ### 3.11 无缓冲 channel 的"发送成功"不代表"处理完成"
 
 ```go
@@ -899,7 +969,7 @@ ch <- task            // 返回时，对方只是"取走了 task"
 // 此处 task 可能一行代码都还没被执行
 ```
 
-由内存模型第 3 条（2.9），无缓冲发送返回只保证接收方**完成了接收动作**。要等对方处理完，必须有回执：
+由内存模型第 3 条（[内存模型：channel 提供的 happens-before 保证](#section-2-9)），无缓冲发送返回只保证接收方**完成了接收动作**。要等对方处理完，必须有回执：
 
 ```go
 type Task struct {
@@ -914,6 +984,8 @@ if err := <-t.reply; err != nil {   // 这才是"处理完成"
 }
 ```
 
+<a id="section-3-12"></a>
+
 ### 3.12 channel 传的是值的拷贝
 
 ```go
@@ -921,7 +993,7 @@ type Big struct{ buf [4096]byte }
 ch := make(chan Big, 100)   // 缓冲区就占 400KB，每次收发还各拷 4KB
 ```
 
-`typedmemmove` 拷的是完整元素（2.5）。大对象应该传指针 `chan *Big`，但随之而来的是**所有权约定**：值一旦发出去，发送方就不能再改它，否则就是没有锁保护的共享写，`-race` 会报数据竞争。
+`typedmemmove` 拷的是完整元素（[sendDirect / recvDirect：绕过缓冲区的直接拷贝](#section-2-5)）。大对象应该传指针 `chan *Big`，但随之而来的是**所有权约定**：值一旦发出去，发送方就不能再改它，否则就是没有锁保护的共享写，`-race` 会报数据竞争。
 
 另一个相关坑是**元素是含指针的 struct 时**，拷贝是浅拷贝：
 
@@ -931,6 +1003,8 @@ m := Msg{Data: buf}
 ch <- m
 buf[0] = 'x'    // 发送方改的是同一块底层数组，接收方看到的数据被篡改了
 ```
+
+<a id="section-3-13"></a>
 
 ### 3.13 死锁：主 goroutine 上的同步操作
 
@@ -954,6 +1028,8 @@ case b <- 1:
 }                  // fatal error: all goroutines are asleep - deadlock!
 ```
 
+<a id="section-3-14"></a>
+
 ### 3.14 select 中同一 channel 出现多个 case
 
 ```go
@@ -966,6 +1042,8 @@ case v := <-ch:   // 分支 B —— 合法，但走哪个是随机的
 ```
 
 编译能过，`sellock` 也做了同 channel 去重（相邻同 channel 只加一次锁），但走 A 还是 B 完全取决于 pollorder 的随机洗牌结果。这几乎总是逻辑错误，应该合并成一个 case 后再分派。
+
+<a id="section-3-15"></a>
 
 ### 3.15 关闭顺序：先关数据，还是先等 worker
 
@@ -986,76 +1064,78 @@ for r := range results { use(r) }        // ③ 正常读到结束
 
 注意 ② 必须放在另一个 goroutine 里：如果在当前 goroutine 直接 `wg.Wait()`，而 worker 正阻塞在 `results <-` 上等人来读，就是互相等待的死锁。
 
+<a id="topic-4"></a>
+
 ## 四、常见面试题
 
 **1. channel 的底层数据结构是什么？**
-`runtime.hchan`：环形缓冲区 `buf` + 读写下标 `recvx`/`sendx` + 元素计数 `qcount` + 容量 `dataqsiz` + 两条等待队列 `recvq`/`sendq`（`sudog` 双向链表）+ 一把 `mutex`。`chan T` 变量本身是指向 `hchan` 的指针，大小 8 字节。详见 2.1。
+`runtime.hchan`：环形缓冲区 `buf` + 读写下标 `recvx`/`sendx` + 元素计数 `qcount` + 容量 `dataqsiz` + 两条等待队列 `recvq`/`sendq`（`sudog` 双向链表）+ 一把 `mutex`。`chan T` 变量本身是指向 `hchan` 的指针，大小 8 字节。详见 [hchan：channel 的运行时结构](#section-2-1)。
 
 **2. channel 是无锁的吗？**
-不是。`hchan` 自带一把运行时 mutex，所有会修改状态的操作都在锁内完成。只有"非阻塞且注定失败"的判断（select 的 default 分支）走无锁快路径，靠"已关闭的 channel 不可能变回可用"这一单调性保证正确。详见 2.3。
+不是。`hchan` 自带一把运行时 mutex，所有会修改状态的操作都在锁内完成。只有"非阻塞且注定失败"的判断（select 的 default 分支）走无锁快路径，靠"已关闭的 channel 不可能变回可用"这一单调性保证正确。详见 [发送：chansend 的四条路径](#section-2-3)。
 
 **3. 无缓冲和有缓冲 channel 的本质区别？**
-无缓冲是**同步交接**：`dataqsiz == 0`，收发双方必须同时就绪，数据从发送者栈**直接拷到**接收者栈（1 次拷贝），发送返回即代表对方已取走。有缓冲是异步：数据经过 `buf` 中转（2 次拷贝），发送返回只代表已放入缓冲区。详见 2.10。
+无缓冲是**同步交接**：`dataqsiz == 0`，收发双方必须同时就绪，数据从发送者栈**直接拷到**接收者栈（1 次拷贝），发送返回即代表对方已取走。有缓冲是异步：数据经过 `buf` 中转（2 次拷贝），发送返回只代表已放入缓冲区。详见 [无缓冲 vs 有缓冲：本质区别](#section-2-10)。
 
 **4. 数据在 channel 里被拷贝了几次？**
-无缓冲 1 次（`sendDirect`：发送者栈 → 接收者栈）；有缓冲一般 2 次（栈 → buf → 栈）；有缓冲但恰好有等待的接收者时也是 1 次（走 `chansend` 的路径 ①，绕过 buf）。详见 2.5。
+无缓冲 1 次（`sendDirect`：发送者栈 → 接收者栈）；有缓冲一般 2 次（栈 → buf → 栈）；有缓冲但恰好有等待的接收者时也是 1 次（走 `chansend` 的路径 ①，绕过 buf）。详见 [sendDirect / recvDirect：绕过缓冲区的直接拷贝](#section-2-5)。
 
 **5. 为什么无缓冲 channel 的直接拷贝要手工加写屏障？**
-这是运行时里唯一"一个运行中的 goroutine 直接写另一个运行中 goroutine 的栈"的场景。GC 假设栈写入只由该 goroutine 自己完成，`typedmemmove` 的 `bulkBarrierPreWrite` 只覆盖堆目标，对栈目标无效，所以 `sendDirect` 手工调 `typeBitsBulkBarrier` + `memmove` 补上写屏障。详见 2.5。
+这是运行时里唯一"一个运行中的 goroutine 直接写另一个运行中 goroutine 的栈"的场景。GC 假设栈写入只由该 goroutine 自己完成，`typedmemmove` 的 `bulkBarrierPreWrite` 只覆盖堆目标，对栈目标无效，所以 `sendDirect` 手工调 `typeBitsBulkBarrier` + `memmove` 补上写屏障。详见 [sendDirect / recvDirect：绕过缓冲区的直接拷贝](#section-2-5)。
 
 **6. 向已关闭的 channel 发送/接收分别是什么行为？**
-发送：**panic** `send on closed channel`——包括"进入时已关闭"和"阻塞期间被关闭"两种，后者在被 `close` 唤醒时通过 `sg.success == false` 判断出来并 panic。接收：**永远安全**，先把缓冲区剩余数据读完，读空后返回 `(零值, false)`。详见 2.3、2.4。
+发送：**panic** `send on closed channel`——包括"进入时已关闭"和"阻塞期间被关闭"两种，后者在被 `close` 唤醒时通过 `sg.success == false` 判断出来并 panic。接收：**永远安全**，先把缓冲区剩余数据读完，读空后返回 `(零值, false)`。详见 [发送：chansend 的四条路径](#section-2-3)、[接收：chanrecv 的四条路径](#section-2-4)。
 
 **7. `close` 是怎么唤醒所有等待者的？为什么要先收集再唤醒？**
-`closechan` 置 `closed = 1`，然后把 `recvq` 和 `sendq` 里所有 `sudog` 取出、统一标记 `success = false`，收集进 `glist`，**解锁之后**才逐个 `goready`。之所以要等解锁：`hchan.lock` 的约束是"持锁时不得改变其他 G 的状态"，否则可能与栈收缩死锁。接收者把 `success=false` 当作 `ok=false`，发送者看到它就 panic——一个标志区分两种行为。详见 2.6。
+`closechan` 置 `closed = 1`，然后把 `recvq` 和 `sendq` 里所有 `sudog` 取出、统一标记 `success = false`，收集进 `glist`，**解锁之后**才逐个 `goready`。之所以要等解锁：`hchan.lock` 的约束是"持锁时不得改变其他 G 的状态"，否则可能与栈收缩死锁。接收者把 `success=false` 当作 `ok=false`，发送者看到它就 panic——一个标志区分两种行为。详见 [close：一次性唤醒所有等待者](#section-2-6)。
 
 **8. 为什么 `close` 能做广播，而发送不能？**
-一次发送只从 `recvq` 里 `dequeue` **一个**等待者；`close` 会把 `recvq` **清空**，唤醒全部。这就是 `context.Done()` 的原理：那个 channel 从不写入，只被 close，所以任意多个监听者都能同时收到。详见 2.6、1.8 ①。
+一次发送只从 `recvq` 里 `dequeue` **一个**等待者；`close` 会把 `recvq` **清空**，唤醒全部。这就是 `context.Done()` 的原理：那个 channel 从不写入，只被 close，所以任意多个监听者都能同时收到。详见 [close：一次性唤醒所有等待者](#section-2-6)、[常用并发模式](#section-1-8) ①。
 
 **9. `v, ok := <-ch` 里 `ok == false` 到底意味着什么？**
-意味着"channel 已关闭**并且**缓冲区已读空"，不是"channel 已关闭"。`chanrecv` 只在 `closed != 0 && qcount == 0` 时才走零值分支，否则继续读缓冲区。详见 1.3、2.4。
+意味着"channel 已关闭**并且**缓冲区已读空"，不是"channel 已关闭"。`chanrecv` 只在 `closed != 0 && qcount == 0` 时才走零值分支，否则继续读缓冲区。详见 [comma-ok 接收与关闭语义](#section-1-3)、[接收：chanrecv 的四条路径](#section-2-4)。
 
 **10. select 是怎么实现的？多个 case 同时就绪时选哪个？**
-先看编译期：0 个 case → `block()` 永久 park；1 个 case → 退化成普通收发；1 个 case + default → `selectnbsend`/`selectnbrecv`；≥2 个才进 `selectgo`。`selectgo` 建两个序：`pollorder` 用 `cheaprandn` 随机洗牌（决定就绪时选谁，实测均匀 50/50），`lockorder` 按 channel 地址排序（决定加锁顺序）。然后三趟：找就绪 → 全部入队并 park → 唤醒后摘除未命中的 sudog。详见 2.8。
+先看编译期：0 个 case → `block()` 永久 park；1 个 case → 退化成普通收发；1 个 case + default → `selectnbsend`/`selectnbrecv`；≥2 个才进 `selectgo`。`selectgo` 建两个序：`pollorder` 用 `cheaprandn` 随机洗牌（决定就绪时选谁，实测均匀 50/50），`lockorder` 按 channel 地址排序（决定加锁顺序）。然后三趟：找就绪 → 全部入队并 park → 唤醒后摘除未命中的 sudog。详见 [select 的实现：编译期降级 + selectgo 三趟扫描](#section-2-8)。
 
 **11. select 为什么要按 channel 地址排序加锁？**
-select 需要同时持有多个 channel 的锁。若两个 select 语句以不同顺序加锁（A→B 和 B→A），就会经典地互相死锁。按 channel 地址（`sortkey()`）排序，保证全进程统一的加锁顺序，从根本上消除环路。详见 2.8。
+select 需要同时持有多个 channel 的锁。若两个 select 语句以不同顺序加锁（A→B 和 B→A），就会经典地互相死锁。按 channel 地址（`sortkey()`）排序，保证全进程统一的加锁顺序，从根本上消除环路。详见 [select 的实现：编译期降级 + selectgo 三趟扫描](#section-2-8)。
 
 **12. select 的第三趟扫描（pass 3）为什么不能省？**
-执行 select 的 G 会在**每个** case 的 channel 队列上挂一个 sudog。被某一个唤醒后，其余 sudog 还留在别的队列里。不摘掉它们，冷清的 channel 上会不断堆积无效 sudog（源码注释：`otherwise they stack up on quiet channels`），既泄漏内存又会引发错误唤醒。详见 2.8。
+执行 select 的 G 会在**每个** case 的 channel 队列上挂一个 sudog。被某一个唤醒后，其余 sudog 还留在别的队列里。不摘掉它们，冷清的 channel 上会不断堆积无效 sudog（源码注释：`otherwise they stack up on quiet channels`），既泄漏内存又会引发错误唤醒。详见 [select 的实现：编译期降级 + selectgo 三趟扫描](#section-2-8)。
 
 **13. 一个 G 挂在多个 channel 上，两个 channel 同时来数据会怎样？**
-`sudog.isSelect == true` 时，`waitq.dequeue` 必须先 `sgp.g.selectDone.CompareAndSwap(0, 1)` 才有权唤醒这个 G。CAS 失败说明别的 case 已经抢到了唤醒权，本次 `dequeue` 跳过它继续找下一个等待者。详见 2.2。
+`sudog.isSelect == true` 时，`waitq.dequeue` 必须先 `sgp.g.selectDone.CompareAndSwap(0, 1)` 才有权唤醒这个 G。CAS 失败说明别的 case 已经抢到了唤醒权，本次 `dequeue` 跳过它继续找下一个等待者。详见 [sudog 与 waitq：谁在等，等什么](#section-2-2)。
 
 **14. `for range ch` 什么时候退出？只 close 不写数据能退出吗？**
-退出条件是"channel 已关闭且缓冲区读空"。只 `close` 不写数据可以正常退出（第一次读就是 `ok == false`）；反之如果永远不 `close`，`range` 就永久阻塞——这是 goroutine 泄漏的常见来源。详见 1.4、3.7。
+退出条件是"channel 已关闭且缓冲区读空"。只 `close` 不写数据可以正常退出（第一次读就是 `ok == false`）；反之如果永远不 `close`，`range` 就永久阻塞——这是 goroutine 泄漏的常见来源。详见 [range 遍历 channel](#section-1-4)、[for range 不会自己结束](#section-3-7)。
 
 **15. 多个发送者时，谁负责 close？**
-没有发送者能安全地关闭。两种正确模式：① `WaitGroup` 等所有发送者退出后，由一个独立的协调 goroutine 关闭；② 关闭信号走独立的 `done`/`ctx.Done()` channel（只 close 不写，多方触发用 `sync.Once` 收口），数据 channel 干脆不关——channel 不被引用后会被 GC 回收，不关不泄漏。详见 3.6。
+没有发送者能安全地关闭。两种正确模式：① `WaitGroup` 等所有发送者退出后，由一个独立的协调 goroutine 关闭；② 关闭信号走独立的 `done`/`ctx.Done()` channel（只 close 不写，多方触发用 `sync.Once` 收口），数据 channel 干脆不关——channel 不被引用后会被 GC 回收，不关不泄漏。详见 [多个发送者时如何安全关闭](#section-3-6)。
 
 **16. 怎么判断一个 channel 是否已关闭？**
-语言**不提供**这个能力，而且这个需求本身就是错的：判断和后续操作之间必然有竞态窗口。只能通过接收的 comma-ok 得知"关闭且已读空"，或者从架构上约定关闭权归属。详见 3.1。
+语言**不提供**这个能力，而且这个需求本身就是错的：判断和后续操作之间必然有竞态窗口。只能通过接收的 comma-ok 得知"关闭且已读空"，或者从架构上约定关闭权归属。详见 [向已关闭的 channel 发送直接 panic](#section-3-1)。
 
 **17. channel 提供哪些内存可见性保证？**
-四条：① 发送 happens-before 对应的接收完成；② `close` happens-before 因关闭而返回零值的接收完成；③ **无缓冲** channel 的接收 happens-before 对应的发送完成；④ 容量 C 的 channel 上第 k 次接收 happens-before 第 k+C 次发送完成。第 ③ 条决定了"无缓冲发送返回 = 对方已取走"；第 ④ 条是拿 channel 当信号量的依据。详见 2.9。
+四条：① 发送 happens-before 对应的接收完成；② `close` happens-before 因关闭而返回零值的接收完成；③ **无缓冲** channel 的接收 happens-before 对应的发送完成；④ 容量 C 的 channel 上第 k 次接收 happens-before 第 k+C 次发送完成。第 ③ 条决定了"无缓冲发送返回 = 对方已取走"；第 ④ 条是拿 channel 当信号量的依据。详见 [内存模型：channel 提供的 happens-before 保证](#section-2-9)。
 
 **18. goroutine 阻塞在 channel 上会占用一个 OS 线程吗？**
-不会。`gopark` 把 G 置为 `_Gwaiting` 并与 M 解绑，M 立刻回调度循环执行别的 G，被阻塞的 G 只是一个挂在 `hchan` 队列上的 `sudog`。这也是能开十万级 goroutine 收发 channel 的原因。唤醒走 `goready`，只是重新入队，**不保证立即执行**。详见 2.7。
+不会。`gopark` 把 G 置为 `_Gwaiting` 并与 M 解绑，M 立刻回调度循环执行别的 G，被阻塞的 G 只是一个挂在 `hchan` 队列上的 `sudog`。这也是能开十万级 goroutine 收发 channel 的原因。唤醒走 `goready`，只是重新入队，**不保证立即执行**。详见 [阻塞与唤醒：挂起的是 G，不是线程](#section-2-7)。
 
 **19. 为什么 channel 元素类型有大小限制？限制是多少？**
-`hchan.elemsize` 是 `uint16`，`makechan` 显式检查 `elem.Size_ >= 1<<16` 就 `throw`，因此元素类型大小必须小于 64KB。实践中远早于这个上限就该改用指针了——拷贝成本是逐字节的。详见 2.1、3.12。
+`hchan.elemsize` 是 `uint16`，`makechan` 显式检查 `elem.Size_ >= 1<<16` 就 `throw`，因此元素类型大小必须小于 64KB。实践中远早于这个上限就该改用指针了——拷贝成本是逐字节的。详见 [hchan：channel 的运行时结构](#section-2-1)、[channel 传的是值的拷贝](#section-3-12)。
 
 **20. `len(ch)`/`cap(ch)` 能用来做流控判断吗？**
-不能。它们只是一次无锁读，返回瞬间就可能失效，而且**不包含阻塞在 `sendq`/`recvq` 上的等待者**。非阻塞收发要用 `select` + `default`（运行时在锁内原子判断）。另外 timer channel 的 `len`/`cap` 被特意伪装成 0，更不能用来判断是否到期。详见 1.6、2.11、3.10。
+不能。它们只是一次无锁读，返回瞬间就可能失效，而且**不包含阻塞在 `sendq`/`recvq` 上的等待者**。非阻塞收发要用 `select` + `default`（运行时在锁内原子判断）。另外 timer channel 的 `len`/`cap` 被特意伪装成 0，更不能用来判断是否到期。详见 [len 与 cap](#section-1-6)、[timer channel：Go 1.23+ 的特殊 hchan](#section-2-11)、[用 len/cap 做控制流是竞态的](#section-3-10)。
 
 **21. 为什么 `time.After` 在循环里有问题？**
-每次 select 求值 case 表达式时都会新建一个 Timer，到期前一直被 runtime 的 timer 堆引用。高频循环会堆积大量 timer。应该复用一个 `time.Timer`（`Stop` + 排空 + `Reset`）。Go 1.23+ 改善了 timer 的 GC 和 `Reset` 语义，危害变小，但复用仍是更省的写法。详见 3.8。
+每次 select 求值 case 表达式时都会新建一个 Timer，到期前一直被 runtime 的 timer 堆引用。高频循环会堆积大量 timer。应该复用一个 `time.Timer`（`Stop` + 排空 + `Reset`）。Go 1.23+ 改善了 timer 的 GC 和 `Reset` 语义，危害变小，但复用仍是更省的写法。详见 [select + time.After 的定时器开销](#section-3-8)。
 
 **22. 有缓冲 channel 满了、有发送者在排队时，接收者拿到的是哪个值？**
-拿到的是**缓冲区队头的旧值**，阻塞发送者的值被放到队尾。由于队列是满的，队头和队尾是同一个槽位，`recv` 一次拷贝就完成了"出队 + 入队"，之后 `recvx++` 且 `sendx = recvx`。这保证了即使中途经历阻塞，FIFO 顺序也不会乱。详见 2.4。
+拿到的是**缓冲区队头的旧值**，阻塞发送者的值被放到队尾。由于队列是满的，队头和队尾是同一个槽位，`recv` 一次拷贝就完成了"出队 + 入队"，之后 `recvx++` 且 `sendx = recvx`。这保证了即使中途经历阻塞，FIFO 顺序也不会乱。详见 [接收：chanrecv 的四条路径](#section-2-4)。
 
 **23. `select {}` 和 `for {}` 有什么区别？**
-`select {}` 被编译成 `block()`，即无条件 `gopark` 永久休眠，**不消耗 CPU**，而且 G 处于 `_Gwaiting`，能被死锁检测器识别（`fatal error: all goroutines are asleep - deadlock!`，goroutine 状态显示为 `select (no cases)`）。`for {}` 是纯自旋，**吃满一个核**，且 G 一直是 `_Grunning`，永远不会被判定为死锁（Go 1.14 起有异步抢占，空循环不会再卡住 GC 和调度，但 CPU 照样白烧）。要永久阻塞当前 goroutine 应该用 `select {}` 或 `<-make(chan struct{})`。详见 2.8。
+`select {}` 被编译成 `block()`，即无条件 `gopark` 永久休眠，**不消耗 CPU**，而且 G 处于 `_Gwaiting`，能被死锁检测器识别（`fatal error: all goroutines are asleep - deadlock!`，goroutine 状态显示为 `select (no cases)`）。`for {}` 是纯自旋，**吃满一个核**，且 G 一直是 `_Grunning`，永远不会被判定为死锁（Go 1.14 起有异步抢占，空循环不会再卡住 GC 和调度，但 CPU 照样白烧）。要永久阻塞当前 goroutine 应该用 `select {}` 或 `<-make(chan struct{})`。详见 [select 的实现：编译期降级 + selectgo 三趟扫描](#section-2-8)。
 
 **24. channel 和 mutex 该怎么选？**
 channel 传递**数据所有权和事件**（生产消费、任务分发、取消通知、结果汇聚、流水线），它同时提供同步和通信；mutex 保护**共享状态的临界区**（计数器、缓存、map）。判断依据：如果在用 channel 模拟"加锁改一个变量再解锁"，就应该用 mutex；如果在用 mutex + 条件变量模拟"等待某个事件/传递数据"，就应该用 channel。Go 官方的说法是 "Don't communicate by sharing memory; share memory by communicating"，但也明确说了 mutex 在保护状态这件事上更合适。

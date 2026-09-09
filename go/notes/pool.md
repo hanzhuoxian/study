@@ -1,10 +1,28 @@
 # sync.Pool
 
+> 定位：临时对象复用、所有权与 GC 淘汰。
+> 前置知识：[接口](interface.md)、[sync](sync.md)、[GMP 模型](gmp.md)、[内存分配与栈](mem.md)、[GC](gc.md)。
+> 配套示例：[pool/main.go](pool/main.go)（`go run ./pool`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [常见陷阱](#topic-9)；深入实现或进阶用法时读 [底层原理](#topic-2) → [源码追踪（进阶，可跳读）](#topic-3)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [底层原理](#topic-2)
+- [常见陷阱](#topic-9)
+- [源码追踪（进阶，可跳读）](#topic-3)
+- [常见面试题](#topic-10)
+
 > 环境：`go version go1.26.3 darwin/arm64`（Apple M4，`GOMAXPROCS=10`）。源码位置：`sync/pool.go`（318 行）、`sync/poolqueue.go`（302 行），GC 回调在 `runtime/mgc.go`。
 >
 > 一句话定位：**`sync.Pool` 是一个「per-P 分片 + 无锁队列 + 两级 GC 淘汰」的临时对象缓存，用来削减 GC 压力，不是资源池、不是连接池、不保证任何对象存活。**
 
+<a id="topic-1"></a>
+
 ## 一、基础使用
+
+<a id="section-1-1"></a>
 
 ### 1.1 最小示例
 
@@ -27,6 +45,8 @@ func handle(w io.Writer, data []string) {
 
 三个动作缺一不可：**Get → Reset → Put**。`Pool` 不会帮你清理对象，`Get` 拿到的可能是别人用过的脏对象。
 
+<a id="section-1-2"></a>
+
 ### 1.2 New 的语义
 
 ```go
@@ -41,6 +61,8 @@ fmt.Println(p.Get())        // 42
 - `New` 只在**所有取值路径都失败之后**才调用（源码 `pool.go:154`），所以它不参与任何锁竞争。
 - `New` 不能与 `Get` 并发修改（文档明确要求），实践上都是在包级变量初始化时一次写定。
 
+<a id="section-1-3"></a>
+
 ### 1.3 三种典型写法对比
 
 ```go
@@ -48,7 +70,7 @@ fmt.Println(p.Get())        // 42
 var p1 = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 buf := p1.Get().(*bytes.Buffer)
 
-// 写法二：New 返回值类型（❌ Put 时会额外分配，见 4.1）
+// 写法二：New 返回值类型（❌ Put 时会额外分配，见 3.1）
 var p2 = sync.Pool{New: func() any { return make([]byte, 0, 4096) }}
 b := p2.Get().([]byte)
 
@@ -57,6 +79,8 @@ var p3 = sync.Pool{New: func() any { s := make([]byte, 0, 4096); return &s }}
 sp := p3.Get().(*[]byte)
 *sp = (*sp)[:0]
 ```
+
+<a id="section-1-4"></a>
 
 ### 1.4 泛型封装（消掉类型断言）
 
@@ -80,6 +104,8 @@ func (tp *TypedPool[T]) Put(x *T) { tp.p.Put(x) }
 
 注意：`sync.Pool` 内部存的是 `any`，泛型封装只能消除**调用方**的断言样板，无法消除装箱本身；所以池化对象类型仍应是指针（`*T`）。
 
+<a id="section-1-5"></a>
+
 ### 1.5 收益有多大（实测）
 
 ```go
@@ -99,7 +125,9 @@ BenchmarkWithPool-10      38.62 ns/op      0 B/op    0 allocs/op
 
 约 15× 提速、0 分配。收益来自两处：省掉 `make` 本身，以及**省掉这些对象后续被 GC 扫描/回收的开销**（后者往往才是大头，benchmark 里体现为 GC 频率下降）。
 
-关键前提：对象要**有一定构造成本**且**生命周期短、复用率高**。小对象（几十字节）池化后往往比直接 `new` 还慢，因为 `Get/Put` 自身有 `procPin`、原子操作、接口装箱的固定开销（见 4.7）。
+关键前提：对象要**有一定构造成本**且**生命周期短、复用率高**。小对象（几十字节）池化后往往比直接 `new` 还慢，因为 `Get/Put` 自身有 `procPin`、原子操作、接口装箱的固定开销（见 [小对象池化反而更慢](#section-4-7)）。
+
+<a id="section-1-6"></a>
 
 ### 1.6 标准库中的用法（都是很好的参考样本）
 
@@ -113,6 +141,8 @@ BenchmarkWithPool-10      38.62 ns/op      0 B/op    0 allocs/op
 | `net/http/header.go:160` `headerSorterPool`                                            | `*headerSorter`                   | 排序临时结构复用                                                                                                     |
 
 `fmt` 和 `h2` 这两个例子回答了同一个问题的两种解法：**「大小不均匀的对象怎么池化」**——要么设上限丢弃超大的（`fmt`），要么按大小分级建多个池（`h2`）。
+
+<a id="section-1-7"></a>
 
 ### 1.7 什么时候**不该**用 sync.Pool
 
@@ -131,7 +161,11 @@ BenchmarkWithPool-10      38.62 ns/op      0 B/op    0 allocs/op
 
 ---
 
+<a id="topic-2"></a>
+
 ## 二、底层原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 整体设计
 
@@ -153,6 +187,8 @@ Get() 的取值路径（Put 只走前两级）
 1. **per-P 分片**：每个 P（逻辑处理器）一份独立的 `poolLocal`，同一个 P 上的 Get/Put 天然串行（因为 `procPin` 禁止了抢占），所以本地路径完全不需要锁。这是 `sync.Pool` 高性能的根基。
 2. **work-stealing**：本地空了去别的 P 偷。`shared` 是一个**单生产者多消费者**的双端队列——本地 P 从**头部**推入/弹出，其他 P 只能从**尾部**偷。头尾分离把「本地操作」和「偷取」的竞争降到最低。
 3. **victim cache（Go 1.13 引入）**：GC 时不直接清空，而是把 `local` 降级为 `victim`，下个 GC 才真正丢弃。让对象有 **1~2 个 GC 周期**的存活期，避免每次 GC 后所有 Pool 集体冷启动造成的分配尖刺。
+
+<a id="section-2-2"></a>
 
 ### 2.2 数据结构
 
@@ -184,6 +220,8 @@ poolDequeue（固定大小无锁环形队列，SPMC）
 
 实测尺寸（`unsafe.Sizeof`）：`sync.Pool` = 40 字节，`poolLocalInternal` = 32 字节，`poolLocal` = **128 字节**。
 
+<a id="section-2-3"></a>
+
 ### 2.3 为什么 poolLocal 要填充到 128 字节
 
 `poolLocalInternal` 只有 32 字节，但源码强行 pad 到 128（`pool.go:77`）：
@@ -195,6 +233,8 @@ pad [128 - unsafe.Sizeof(poolLocalInternal{})%128]byte  // 96 字节填充
 因为 `local` 是一个**连续数组**，如果不填充，4 个 P 的 `poolLocal` 会挤在同一条缓存行里。P0 写自己的 `private`，会让 P1/P2/P3 缓存行失效，触发大量缓存一致性流量——这就是**伪共享（false sharing）**。填充到 128 字节（注释写的是「`128 mod cacheline == 0` 的平台」，覆盖 64 字节缓存行的 x86 和 128 字节缓存行的 Apple Silicon）后，每个 P 独占自己的缓存行，跨 P 干扰消失。
 
 这也解释了为什么 `sync.Pool` 在核数越多的机器上相对优势越明显。
+
+<a id="section-2-4"></a>
 
 ### 2.4 pin：为什么必须禁用抢占
 
@@ -216,6 +256,8 @@ func procPin() int {
 3. **`localSize` / `local` 的读序**：pin 里先 load-acquire `localSize` 再 load `local`（与 `pinSlow` 的写序相反，`pool.go:211-216`）。因为 pin 期间 GC 不可能发生，就能保证观察到的 `local` 数组至少和 `localSize` 一样大。
 
 `pin` 有个细节：`p == nil` 的检查放在 `procPin` **之前**（`pool.go:206`）。如果放在之后，nil 解引用会发生在 pinned 区间内，`m.locks > 0` 时的 panic 会被运行时升级成不可恢复的 `fatal error`。为了让用户看到正常的 panic 栈，特地提前判空。
+
+<a id="section-2-5"></a>
 
 ### 2.5 poolChain / poolDequeue：无锁环形队列
 
@@ -263,6 +305,8 @@ func (c *poolChain) pushHead(val any) {
 
 摘链用 `c.tail.CompareAndSwap(d, d2)`，赢的那个把 `d2.prev` 置 nil——既让空节点可被 GC 回收，也防止 `popHead` 沿 prev 链回溯得过远。
 
+<a id="section-2-6"></a>
+
 ### 2.6 victim cache 与 GC 的关系
 
 `sync.Pool` 的生命周期完全由 GC 驱动。`init` 里向运行时注册回调（`pool.go:296`），GC 在 `gcStart` 的 STW 阶段调用 `clearpools()`（`runtime/mgc.go:875`、`2159`）：
@@ -304,6 +348,8 @@ put 100
 
 **推论**：Pool 的实际缓存效果与 GC 频率强相关。GC 越频繁（堆小、`GOGC` 低），对象越容易被淘汰，池的命中率越低。压测时如果 Pool 收益不明显，可以先看 `GODEBUG=gctrace=1` 确认 GC 频率。
 
+<a id="section-2-7"></a>
+
 ### 2.7 getSlow 的两个细节
 
 ```go
@@ -330,9 +376,167 @@ func (p *Pool) getSlow(pid int) any {
 
 ---
 
-## 三、关键源码解读
+<a id="topic-9"></a>
 
-### ① Pool 与 poolLocal（pool.go:51、67）
+## 三、常见陷阱
+
+<a id="section-4-1"></a>
+
+### 3.1 Put 值类型会额外分配一次
+
+`Put(x any)` 的参数是接口。放入非指针类型时，值必须装箱到堆上（因为它要逃逸进池里），这就多了一次分配——池化的目的直接被抵消了一部分。
+
+```go
+// ❌ 每次 Put 都装箱分配
+var bad = sync.Pool{New: func() any { return make([]byte, 0, 1024) }}
+s := bad.Get().([]byte)
+bad.Put(s)                    // []byte 是 24 字节的 header，装箱 → 1 alloc
+
+// ✅ 指针本身能直接塞进 eface 的 data 字段，零分配
+var good = sync.Pool{New: func() any { s := make([]byte, 0, 1024); return &s }}
+p := good.Get().(*[]byte)
+good.Put(p)
+```
+
+实测差异：
+
+```
+BenchmarkPutSliceValue-10    16.35 ns/op    24 B/op    1 allocs/op
+BenchmarkPutSlicePtr-10       7.302 ns/op    0 B/op    0 allocs/op
+```
+
+`staticcheck` 有对应检查 **SA6002**（*argument should be pointer-like to avoid allocations*）。
+
+<a id="section-4-2"></a>
+
+### 3.2 忘记 Reset：脏数据与信息泄漏
+
+```go
+buf := pool.Get().(*bytes.Buffer)
+// 忘了 buf.Reset()
+buf.WriteString(userInput)
+resp.Write(buf.Bytes())     // ⚠️ 前面残留的内容也一起发出去了
+```
+
+在 HTTP handler 里这是**真实的跨请求信息泄漏**：上一个用户的响应内容可能被拼到下一个用户的响应里。
+
+`Reset` 放在 Get 之后还是 Put 之前，两种流派都有人用，但**必须二选一并全局统一**：
+
+```go
+// 流派 A（推荐）：Get 后立刻 Reset —— 防御性更强，不依赖所有 Put 点都守规矩
+buf := pool.Get().(*bytes.Buffer); buf.Reset()
+
+// 流派 B：Put 前 Reset —— 池内对象始终是干净的，但漏掉任何一个 Put 点就出问题
+buf.Reset(); pool.Put(buf)
+```
+
+注意 struct 的重置要**逐字段**考虑，尤其是 slice/map 字段：`s = s[:0]` 保留了底层数组（这是我们要的），但如果元素是指针，`s[:0]` **不会**清掉底层数组里的指针引用，会让被引用对象一直存活。需要彻底清时用 `clear(s)` 再 `s = s[:0]`。
+
+<a id="section-4-3"></a>
+
+### 3.3 Put 之后继续使用对象
+
+```go
+pool.Put(buf)
+buf.WriteString("x")   // ⚠️ 数据竞争：buf 可能已被别的 goroutine Get 到
+```
+
+`Put` 是所有权转移。常见的隐蔽版本是 `defer pool.Put(buf)` 配合返回了 `buf.Bytes()`：
+
+```go
+func render() []byte {
+    buf := pool.Get().(*bytes.Buffer)
+    defer pool.Put(buf)
+    buf.WriteString("...")
+    return buf.Bytes()      // ⚠️ 返回的 slice 指向池内 buffer 的底层数组
+}
+```
+
+返回值必须拷贝：`return bytes.Clone(buf.Bytes())`。这类 bug 在低并发下几乎不复现，上线才炸。
+
+<a id="section-4-4"></a>
+
+### 3.4 大对象回池导致内存不降
+
+`Pool` 没有容量上限。如果偶发的超大对象（比如一次 100MB 的响应体）被 Put 回池，它会一直占着内存直到两轮 GC 之后——而只要池还在被高频使用，这块内存的常驻概率就很高。
+
+标准库的两种解法（见 [标准库中的用法（都是很好的参考样本）](#section-1-6)）：
+
+```go
+// 解法一：设上限，超了就丢（fmt 的做法）
+func put(buf *bytes.Buffer) {
+    if buf.Cap() > 64*1024 { return }   // 直接不回池，交给 GC
+    buf.Reset()
+    pool.Put(buf)
+}
+
+// 解法二：按大小分级（net/http2 的做法）
+var pools [7]sync.Pool                   // 16K/32K/64K/128K/256K/512K/∞
+func idx(size int) int {
+    if size <= 16384 { return 0 }
+    i := bits.Len(uint(size-1)) - 14
+    return min(i, len(pools)-1)
+}
+```
+
+<a id="section-4-5"></a>
+
+### 3.5 对象大小不均匀 → 命中即浪费
+
+文档原文：*Proper usage of a Pool requires each entry to have approximately the same memory cost.* 如果一个池里同时有 1KB 和 1MB 的 buffer，需要 1KB 时可能拿到 1MB（浪费内存），需要 1MB 时可能拿到 1KB（还得扩容，池化收益归零）。所以要么统一规格，要么分级建池。
+
+<a id="section-4-6"></a>
+
+### 3.6 把 Pool 当资源池用
+
+```go
+// ❌ 严重错误
+var connPool = sync.Pool{New: func() any { c, _ := net.Dial("tcp", addr); return c }}
+```
+
+被 GC 丢弃的 `net.Conn` 不会被 `Close()`（`sync.Pool` 没有任何销毁钩子），fd 会一直泄漏到对象被 GC 回收、finalizer（如果有）才可能关闭——而 `net.Conn` 的 finalizer 行为不该被依赖。同理适用于文件句柄、goroutine、锁、带外部状态的 client。详见 [什么时候**不该**用 sync.Pool](#section-1-7) 的能力对照表。
+
+<a id="section-4-7"></a>
+
+### 3.7 小对象池化反而更慢
+
+`Get`/`Put` 的固定成本：`procPin`（一次 `m.locks++`）+ 至少一次原子 load + 可能的 CAS + 接口装箱/断言。实测量级在 5~15ns。如果对象本身 `new` 出来只要 2ns（比如一个 16 字节的小 struct），池化就是纯亏。
+
+判断标准：**构造成本 ≫ Get/Put 开销，且对象够大到值得省 GC 扫描**。不确定就写 benchmark，别凭感觉。
+
+<a id="section-4-8"></a>
+
+### 3.8 不能拷贝 Pool
+
+```go
+var p sync.Pool
+p.Put(1)
+q := p          // go vet: assignment copies lock value to q
+```
+
+同理不能把 `sync.Pool`（值，非指针）作为字段放进会被拷贝的 struct，也不能用值接收者的方法去传递它。总是用 `*sync.Pool` 或包级变量。
+
+<a id="section-4-9"></a>
+
+### 3.9 Get 拿到的不一定是你 Put 的
+
+文档：*Callers should not assume any relation between values passed to Put and the values returned by Get.* 可能来自其他 P（偷取）、来自 victim、或者干脆是 `New()` 现造的。任何「Put 进去 Get 一定拿得到」的逻辑都是错的——`-race` 模式的 25% 随机丢弃（见 ②）就是专门用来打这类假设的。
+
+<a id="section-4-10"></a>
+
+### 3.10 单个对象 + GC 后大概率丢失
+
+如 [getSlow 的两个细节](#section-2-7) 所述，落在 `victim.private` 里的对象只有原 P 上的 goroutine 能取回，且一次失败扫描会作废整个 victim。对于**低频使用**的 Pool（池里长期只有寥寥几个对象），命中率会很难看。`sync.Pool` 是为高频并发场景设计的；低频场景直接 `new` 更简单也更可预测。
+
+---
+
+<a id="topic-3"></a>
+
+## 四、源码追踪（进阶，可跳读）
+
+<a id="topic-4"></a>
+
+### 4.1 ① Pool 与 poolLocal（pool.go:51、67）
 
 ```go
 type Pool struct {
@@ -365,7 +569,9 @@ copy/main.go:8:7: assignment copies lock value to q: sync.Pool contains sync.noC
 
 注意这只是 vet 的静态检查，编译**不会**失败。拷贝一个已使用的 Pool，会复制 `local` 指针，两个 Pool 共享同一份 `poolLocal` 数组，而 `poolCleanup` 只认识 `allPools` 里注册过的那一个 → 悬空引用 + 双重管理。
 
-### ② Put：两级写入（pool.go:99）
+<a id="topic-5"></a>
+
+### 4.2 ② Put：两级写入（pool.go:99）
 
 ```go
 func (p *Pool) Put(x any) {
@@ -392,7 +598,9 @@ func (p *Pool) Put(x any) {
 
 `race.ReleaseMerge` / `race.Acquire`（在 Get 里）建立起了文档承诺的 happens-before：*a call to Put(x) "synchronizes before" a call to Get returning that same value x*。
 
-### ③ Get：分级取值（pool.go:131）
+<a id="topic-6"></a>
+
+### 4.3 ③ Get：分级取值（pool.go:131）
 
 ```go
 func (p *Pool) Get() any {
@@ -419,7 +627,9 @@ func (p *Pool) Get() any {
 - **本地取队头而非队尾**：注释 *we prefer the head over the tail for temporal locality of reuse* —— 队头是最近 Put 进来的对象，更可能还在 CPU 缓存里。同时头/尾分离让本地 `popHead` 和远程 `popTail` 打不到同一个槽位。
 - **`New()` 在 unpin 之后调用**：`New` 是用户代码，可能分配大对象、可能触发 GC、甚至可能阻塞。放在 pin 区间内会拖长禁止抢占的窗口，也可能与 STW 死锁。
 
-### ④ pin / pinSlow：延迟初始化（pool.go:202、223）
+<a id="topic-7"></a>
+
+### 4.4 ④ pin / pinSlow：延迟初始化（pool.go:202、223）
 
 `pinSlow` 处理两种情况：Pool 首次使用，以及 `GOMAXPROCS` 变大。
 
@@ -448,7 +658,9 @@ func (p *Pool) pinSlow() (*poolLocal, int) {
 - **写序与读序相反**：这里先 store `local` 再 store `localSize`，`pin` 里先 load `localSize` 再 load `local`。这个 acquire/release 配对保证读到某个 `localSize` 时，对应的 `local` 数组一定已经完整初始化。
 - 注释 *"If GOMAXPROCS changes between GCs, we re-allocate the array and lose the old one"*：`GOMAXPROCS` 变大时整个 `local` 数组被换掉，**里面缓存的对象全部丢失**。Go 1.25 起 `GOMAXPROCS` 默认变成容器感知且会**运行时自动调整**（`runtime/proc.go` 的 `updatemaxprocs`，每秒检查 cgroup 配额），所以在容器里 CPU limit 变化时，Pool 会经历一次静默的全量清空。反过来 `GOMAXPROCS` 变小则不会触发重建（`pid < localSize` 恒成立），只是尾部若干 `poolLocal` 从此不再被本地访问，只能被偷取。
 
-### ⑤ poolCleanup（pool.go:257）
+<a id="topic-8"></a>
+
+### 4.5 ⑤ poolCleanup（pool.go:257）
 
 ```go
 //go:linkname poolCleanup
@@ -466,137 +678,7 @@ func poolCleanup() {
 
 ---
 
-## 四、常见陷阱
-
-### 4.1 Put 值类型会额外分配一次
-
-`Put(x any)` 的参数是接口。放入非指针类型时，值必须装箱到堆上（因为它要逃逸进池里），这就多了一次分配——池化的目的直接被抵消了一部分。
-
-```go
-// ❌ 每次 Put 都装箱分配
-var bad = sync.Pool{New: func() any { return make([]byte, 0, 1024) }}
-s := bad.Get().([]byte)
-bad.Put(s)                    // []byte 是 24 字节的 header，装箱 → 1 alloc
-
-// ✅ 指针本身能直接塞进 eface 的 data 字段，零分配
-var good = sync.Pool{New: func() any { s := make([]byte, 0, 1024); return &s }}
-p := good.Get().(*[]byte)
-good.Put(p)
-```
-
-实测差异：
-
-```
-BenchmarkPutSliceValue-10    16.35 ns/op    24 B/op    1 allocs/op
-BenchmarkPutSlicePtr-10       7.302 ns/op    0 B/op    0 allocs/op
-```
-
-`staticcheck` 有对应检查 **SA6002**（*argument should be pointer-like to avoid allocations*）。
-
-### 4.2 忘记 Reset：脏数据与信息泄漏
-
-```go
-buf := pool.Get().(*bytes.Buffer)
-// 忘了 buf.Reset()
-buf.WriteString(userInput)
-resp.Write(buf.Bytes())     // ⚠️ 前面残留的内容也一起发出去了
-```
-
-在 HTTP handler 里这是**真实的跨请求信息泄漏**：上一个用户的响应内容可能被拼到下一个用户的响应里。
-
-`Reset` 放在 Get 之后还是 Put 之前，两种流派都有人用，但**必须二选一并全局统一**：
-
-```go
-// 流派 A（推荐）：Get 后立刻 Reset —— 防御性更强，不依赖所有 Put 点都守规矩
-buf := pool.Get().(*bytes.Buffer); buf.Reset()
-
-// 流派 B：Put 前 Reset —— 池内对象始终是干净的，但漏掉任何一个 Put 点就出问题
-buf.Reset(); pool.Put(buf)
-```
-
-注意 struct 的重置要**逐字段**考虑，尤其是 slice/map 字段：`s = s[:0]` 保留了底层数组（这是我们要的），但如果元素是指针，`s[:0]` **不会**清掉底层数组里的指针引用，会让被引用对象一直存活。需要彻底清时用 `clear(s)` 再 `s = s[:0]`。
-
-### 4.3 Put 之后继续使用对象
-
-```go
-pool.Put(buf)
-buf.WriteString("x")   // ⚠️ 数据竞争：buf 可能已被别的 goroutine Get 到
-```
-
-`Put` 是所有权转移。常见的隐蔽版本是 `defer pool.Put(buf)` 配合返回了 `buf.Bytes()`：
-
-```go
-func render() []byte {
-    buf := pool.Get().(*bytes.Buffer)
-    defer pool.Put(buf)
-    buf.WriteString("...")
-    return buf.Bytes()      // ⚠️ 返回的 slice 指向池内 buffer 的底层数组
-}
-```
-
-返回值必须拷贝：`return bytes.Clone(buf.Bytes())`。这类 bug 在低并发下几乎不复现，上线才炸。
-
-### 4.4 大对象回池导致内存不降
-
-`Pool` 没有容量上限。如果偶发的超大对象（比如一次 100MB 的响应体）被 Put 回池，它会一直占着内存直到两轮 GC 之后——而只要池还在被高频使用，这块内存的常驻概率就很高。
-
-标准库的两种解法（见 1.6）：
-
-```go
-// 解法一：设上限，超了就丢（fmt 的做法）
-func put(buf *bytes.Buffer) {
-    if buf.Cap() > 64*1024 { return }   // 直接不回池，交给 GC
-    buf.Reset()
-    pool.Put(buf)
-}
-
-// 解法二：按大小分级（net/http2 的做法）
-var pools [7]sync.Pool                   // 16K/32K/64K/128K/256K/512K/∞
-func idx(size int) int {
-    if size <= 16384 { return 0 }
-    i := bits.Len(uint(size-1)) - 14
-    return min(i, len(pools)-1)
-}
-```
-
-### 4.5 对象大小不均匀 → 命中即浪费
-
-文档原文：*Proper usage of a Pool requires each entry to have approximately the same memory cost.* 如果一个池里同时有 1KB 和 1MB 的 buffer，需要 1KB 时可能拿到 1MB（浪费内存），需要 1MB 时可能拿到 1KB（还得扩容，池化收益归零）。所以要么统一规格，要么分级建池。
-
-### 4.6 把 Pool 当资源池用
-
-```go
-// ❌ 严重错误
-var connPool = sync.Pool{New: func() any { c, _ := net.Dial("tcp", addr); return c }}
-```
-
-被 GC 丢弃的 `net.Conn` 不会被 `Close()`（`sync.Pool` 没有任何销毁钩子），fd 会一直泄漏到对象被 GC 回收、finalizer（如果有）才可能关闭——而 `net.Conn` 的 finalizer 行为不该被依赖。同理适用于文件句柄、goroutine、锁、带外部状态的 client。详见 1.7 的能力对照表。
-
-### 4.7 小对象池化反而更慢
-
-`Get`/`Put` 的固定成本：`procPin`（一次 `m.locks++`）+ 至少一次原子 load + 可能的 CAS + 接口装箱/断言。实测量级在 5~15ns。如果对象本身 `new` 出来只要 2ns（比如一个 16 字节的小 struct），池化就是纯亏。
-
-判断标准：**构造成本 ≫ Get/Put 开销，且对象够大到值得省 GC 扫描**。不确定就写 benchmark，别凭感觉。
-
-### 4.8 不能拷贝 Pool
-
-```go
-var p sync.Pool
-p.Put(1)
-q := p          // go vet: assignment copies lock value to q
-```
-
-同理不能把 `sync.Pool`（值，非指针）作为字段放进会被拷贝的 struct，也不能用值接收者的方法去传递它。总是用 `*sync.Pool` 或包级变量。
-
-### 4.9 Get 拿到的不一定是你 Put 的
-
-文档：*Callers should not assume any relation between values passed to Put and the values returned by Get.* 可能来自其他 P（偷取）、来自 victim、或者干脆是 `New()` 现造的。任何「Put 进去 Get 一定拿得到」的逻辑都是错的——`-race` 模式的 25% 随机丢弃（见 ②）就是专门用来打这类假设的。
-
-### 4.10 单个对象 + GC 后大概率丢失
-
-如 2.7 所述，落在 `victim.private` 里的对象只有原 P 上的 goroutine 能取回，且一次失败扫描会作废整个 victim。对于**低频使用**的 Pool（池里长期只有寥寥几个对象），命中率会很难看。`sync.Pool` 是为高频并发场景设计的；低频场景直接 `new` 更简单也更可预测。
-
----
+<a id="topic-10"></a>
 
 ## 五、常见面试题
 

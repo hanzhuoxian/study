@@ -1,24 +1,73 @@
 # json
 
+> 定位：JSON 编解码；源码与实验性 v2 分层阅读。
+> 前置知识：[Struct](struct.md)、[接口](interface.md)。
+> 配套示例：[json/main.go](json/main.go)（`go run ./json`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [最小编解码示例](#json-quickstart) → [struct tag 用法](#topic-1) → [流式编解码：Decoder / Encoder](#topic-19)；深入实现或进阶用法时读 [typeFields 字段解析规则（Marshal/Unmarshal 共用）](#topic-18) → [Marshal 源码解析](#topic-7) → [Unmarshal 源码解析](#topic-13) → [encoding/json/v2 与 jsontext（实验性新一代实现）](#topic-20)。
+
+**篇内导航**
+
+- [最小编解码示例](#json-quickstart)
+- [struct tag 用法](#topic-1)
+- [流式编解码：Decoder / Encoder](#topic-19)
+- [typeFields 字段解析规则（Marshal/Unmarshal 共用）](#topic-18)
+- [Marshal 源码解析](#topic-7)
+- [Unmarshal 源码解析](#topic-13)
+- [encoding/json/v2 与 jsontext（实验性新一代实现）](#topic-20)
+- [面试问题](#topic-27)
+
 > 基于 Go 1.26（`GOEXPERIMENT=jsonv2` 关闭时的默认实现，即 `encode.go` / `decode.go` / `tags.go`）源码整理。
 
-## 一、struct tag 用法
+<a id="json-quickstart"></a>
+
+## 一、最小编解码示例
+
+以下是可放入 `main` 函数的完整操作片段，需导入 `encoding/json` 与 `fmt`：
+
+```go
+type User struct {
+    Name string `json:"name"`
+    Age  int    `json:"age"`
+}
+data, err := json.Marshal(User{Name: "Alice", Age: 20})
+if err != nil {
+    panic(err) // 示例入口；库函数应将错误返回给调用方
+}
+var user User
+if err := json.Unmarshal(data, &user); err != nil {
+    panic(err)
+}
+fmt.Println(string(data), user.Name) // {"name":"Alice","age":20} Alice
+```
+
+`Marshal` 把值编码成字节，`Unmarshal` 的目标必须是非 nil 指针。数字精度、未知字段与自定义序列化的完整实验见 [json/main.go](json/main.go)。
+
+<a id="topic-1"></a>
+
+## 二、struct tag 用法
 
 `json:"name,opt1,opt2"`，逗号前是自定义字段名，逗号后是选项列表。
 
-### 字段名
+<a id="topic-2"></a>
+
+### 2.1 字段名
 
 - 不写 tag：默认使用 Go 字段名（必须是导出字段，首字母大写）。
 - `json:"name"`：编解码时使用 `name` 作为 key。
 - `json:"-"`：该字段完全不参与编解码（唯一例外：`json:"-,"` 表示字段名字面量就是 `-`）。
 
-### omitempty
+<a id="topic-3"></a>
+
+### 2.2 omitempty
 
 字段值为 **empty** 时序列化时省略该字段。
 "empty" 的定义：`false`、`0`、`nil` 指针、`nil` interface，以及长度为 0 的 array/slice/map/string。
 注意：**对 struct 类型不生效**（struct 永远不被认为是 empty，即使所有字段都是零值）—— 因为 `isEmptyValue` 只判断上述几种 `reflect.Kind`，`Struct` 落入 `default` 分支返回 `false`。
 
-### omitzero
+<a id="topic-4"></a>
+
+### 2.3 omitzero
 
 字段值为**零值**时省略，判断规则：
 1. 如果类型实现了 `interface{ IsZero() bool }`（如 `time.Time`），优先调用该方法判断；
@@ -27,20 +76,68 @@
 与 `omitempty` 的关键区别：`omitzero` **对 struct 类型也生效**（只要整个 struct 等于零值，或其 `IsZero()` 返回 true）。
 两者可同时使用：`json:",omitempty,omitzero"`，此时值为 empty 或 zero 都会省略。
 
-### string
+<a id="topic-5"></a>
+
+### 2.4 string
 
 把字段值编码成 "JSON 字符串"（即再包一层引号），常用于和 JS 交互时避免大整数精度丢失等问题。
 只对 string、浮点、整数、bool 类型生效，例如 `int64` 字段加了 `,string` 后会被编码成 `"123"` 而不是 `123`。
 
-### 匿名（嵌入）字段
+<a id="topic-6"></a>
+
+### 2.5 匿名（嵌入）字段
 
 匿名 struct 字段的子字段会被"提升"到外层参与编解码，冲突消解规则见下文「typeFields 字段解析规则」。
 
 ---
 
-## 二、Marshal 源码解析
+<a id="topic-19"></a>
 
-### 整体调用链
+## 三、流式编解码：Decoder / Encoder
+
+`json.Marshal`/`json.Unmarshal` 是"一次性、全量在内存"的 API：入参/出参都是完整的 `[]byte`。
+`json.NewDecoder(r io.Reader)`/`json.NewEncoder(w io.Writer)` 则面向 `io.Reader`/`io.Writer`，适合：
+
+- 网络流（如 HTTP body）：不需要先 `io.ReadAll` 把整个 body 读进内存再 `Unmarshal`，省去调用方额外的 `ReadAll`；但 `Decode` 仍会缓冲一个完整 JSON 值，不能据此认为处理单个超大对象时内存恒定。
+- 连续多个 JSON 值（JSON Lines / streaming JSON）：同一个 `Decoder` 反复调用 `Decode()` 可以依次读出多个顶层 JSON 值，循环调用 `Decode` 并以 `io.EOF` 结束；`More()` 用于判断当前数组或对象内是否还有元素，不用于判断顶层流结束。
+
+`Decoder` 内部维护一个 `bufio` 风格的缓冲区，`Decode` 时若当前 buffer 里的数据不足以构成一个完整 JSON 值，会调用 `refill()` 继续从底层 `io.Reader` 读取补充，而不是要求一次性传入完整数据。`Token()` 提供更底层的、按 token（`{`/`}`/`[`/`]`/key/value）遍历 JSON 的能力，用于流式处理超大 JSON 而不想一次性反射到具体的 struct。
+
+`Encoder.Encode(v)` 相当于 `Marshal(v)` 后再写入 `w`，并在末尾追加换行符 `\n`（这是和 `Marshal` 明确不同的行为），适合按行输出多个 JSON 对象。
+
+对比：
+
+|                           | 输入/输出               | 是否要求完整数据 | 典型场景                                                          |
+| ------------------------- | ----------------------- | ---------------- | ----------------------------------------------------------------- |
+| `Marshal`/`Unmarshal`     | `[]byte`                | 是               | 内存中已有的数据、需要拿到完整 `[]byte` 做其他处理（如计算 hash） |
+| `NewEncoder`/`NewDecoder` | `io.Writer`/`io.Reader` | 调用方无需完整字节切片；Decode 缓冲单个值 | HTTP body、文件、多个连续 JSON 值                                 |
+
+---
+
+<a id="topic-18"></a>
+
+## 四、typeFields 字段解析规则（Marshal/Unmarshal 共用）
+
+`typeFields(t)` 在类型第一次被编解码时执行一次并缓存结果（`cachedTypeFields`），核心是解决"匿名嵌入字段提升"和"命名冲突"：
+
+1. **按 BFS 逐层展开**：从最外层 struct 开始，同一层的所有字段先收集，如果本层没有出现同名冲突，才会展开下一层的匿名字段（`next`/`current` 两个队列 + `nextCount` 计数）。也就是说，**浅层字段总是优先于深层同名字段**（类似 Go 语言里字段/方法遮蔽规则）。
+2. **未导出的匿名非 struct 字段会被忽略**（因为无法从包外访问）。
+3. **同一层出现同名冲突**（比如两个匿名字段都提升出一个 `Name`）：
+   - 如果只有一个字段显式写了 tag，tag 优先，冲突消解为那个字段；
+   - 如果都写了/都没写 tag，这些字段全部丢弃，谁都不参与编解码（Go 的"二义性即不存在"哲学）。
+4. 解析出的每个 `field` 会预先计算好：JSON 转义后的字段名（HTML 转义/非转义两个版本）、`omitempty`/`omitzero`/`string` 等选项、字段访问路径 `index []int`（支持多级嵌入）、对应的 `encoderFunc`。
+
+这一整套解析只做一次，后续所有该类型的 Marshal/Unmarshal 都复用缓存结果，是 `encoding/json` 反射开销可控的关键设计。
+
+---
+
+<a id="topic-7"></a>
+
+## 五、Marshal 源码解析
+
+<a id="topic-8"></a>
+
+### 5.1 整体调用链
 
 ```go
 Marshal(v)
@@ -74,7 +171,9 @@ func cachedTypeEncoder(t reflect.Type) encoderFunc {
 
 之后同类型的每次 `Marshal` 都直接走缓存的 `encoderFunc`，避免重复的反射类型判断——这是 `encoding/json` 性能优化的核心手段。
 
-### encoder 的选择优先级（newTypeEncoder）
+<a id="topic-9"></a>
+
+### 5.2 encoder 的选择优先级（newTypeEncoder）
 
 对一个类型 `t`，按以下顺序决定用哪个 `encoderFunc`：
 
@@ -85,7 +184,9 @@ func cachedTypeEncoder(t reflect.Type) encoderFunc {
 
 即优先级：`Marshaler` > `TextMarshaler` > 类型默认规则。这也是为什么自定义 `MarshalJSON` 可以完全接管某个类型的序列化行为。
 
-### struct 的编码（structEncoder）
+<a id="topic-10"></a>
+
+### 5.3 struct 的编码（structEncoder）
 
 `typeFields(t)` 只在类型首次编码时解析一次 tag、匿名嵌入、命名冲突等信息，结果同样被缓存（`cachedTypeFields`，也是 `sync.Map`）。之后 `structEncoder.encode` 只是遍历这份预解析好的 `[]field`：
 
@@ -119,7 +220,9 @@ FieldLoop:
 
 要点：字段名的 JSON 转义在 `typeFields` 阶段就预计算好并缓存了（`nameEscHTML`/`nameNonEsc`），编码时不会重复做字符串转义，进一步减少运行时开销。
 
-### map 的编码（mapEncoder）—— key 会被排序
+<a id="topic-11"></a>
+
+### 5.4 map 的编码（mapEncoder）—— key 会被排序
 
 `encoding/json` 对 map 编码时会显式对 key 排序，保证同一个 map 每次序列化结果**确定（deterministic）**：
 
@@ -133,7 +236,9 @@ slices.SortFunc(sv, func(i, j reflectWithString) int {
 
 这也解释了为什么 map 序列化比 struct 序列化更慢：多了一次 key 提取 + 排序。
 
-### 特殊情况
+<a id="topic-12"></a>
+
+### 5.5 特殊情况
 
 - `[]byte`：不会被当成普通 slice 编码，而是走 `encodeByteSlice`，Base64 编码后作为 JSON 字符串。
 - 循环引用检测：`ptrEncoder`/`mapEncoder` 里有 `e.ptrLevel` 计数器，超过阈值（`startDetectingCyclesAfter`）后才开始用 `ptrSeen` 记录已访问指针，检测到环会返回 `UnsupportedValueError`（避免正常场景下每次都做昂贵的环检测，只有嵌套很深时才启用）。
@@ -141,9 +246,13 @@ slices.SortFunc(sv, func(i, j reflectWithString) int {
 
 ---
 
-## 三、Unmarshal 源码解析
+<a id="topic-13"></a>
 
-### 整体调用链
+## 六、Unmarshal 源码解析
+
+<a id="topic-14"></a>
+
+### 6.1 整体调用链
 
 ```go
 Unmarshal(data, v)
@@ -154,7 +263,9 @@ Unmarshal(data, v)
 
 `decodeState` 内部先用一个轻量 `scanner`（状态机）扫描 JSON 文本，得到 token 边界（`scanBeginObject`/`scanBeginArray`/`scanBeginLiteral` 等 opcode），再驱动 `object()`/`array()`/`literalStore()` 做真正的反射赋值——即"扫描"和"赋值"是分离的两层。
 
-### indirect：处理指针链、接口、Unmarshaler 优先级
+<a id="topic-15"></a>
+
+### 6.2 indirect：处理指针链、接口、Unmarshaler 优先级
 
 这是 Unmarshal 里最精巧的一段逻辑，作用是把 `v` 一路解引用到一个可以真正赋值的 `reflect.Value`，期间：
 
@@ -165,7 +276,9 @@ Unmarshal(data, v)
 
 优先级：`Unmarshaler` > `TextUnmarshaler` > 反射默认规则。和 Marshal 对称。
 
-### object 的解析（字段匹配规则）
+<a id="topic-16"></a>
+
+### 6.3 object 的解析（字段匹配规则）
 
 ```go
 func (d *decodeState) object(v reflect.Value) error {
@@ -194,53 +307,23 @@ func (d *decodeState) object(v reflect.Value) error {
 - 目标是 `map[K]V` 时不用 `typeFields`，而是校验 key 类型（string/整数/`TextUnmarshaler`），每次新建/复用一个 `mapElem` 承载 value 后 `SetMapIndex`。
 - 目标是 `nil` 接口（无方法接口 `any`）时不走反射，直接用 `objectInterface()` 递归解析成 `map[string]any`，效率更高也更简单。
 
-### array 的解析
+<a id="topic-17"></a>
 
-对 slice：容量不够会 `growslice` 扩容；JSON 数组元素比 slice 长度多时，多余的会被静默丢弃；数组（`[N]T`）多余的元素同样丢弃，元素不足则保留剩余位置的零值。
+### 6.4 array 的解析
 
----
-
-## 四、typeFields 字段解析规则（Marshal/Unmarshal 共用）
-
-`typeFields(t)` 在类型第一次被编解码时执行一次并缓存结果（`cachedTypeFields`），核心是解决"匿名嵌入字段提升"和"命名冲突"：
-
-1. **按 BFS 逐层展开**：从最外层 struct 开始，同一层的所有字段先收集，如果本层没有出现同名冲突，才会展开下一层的匿名字段（`next`/`current` 两个队列 + `nextCount` 计数）。也就是说，**浅层字段总是优先于深层同名字段**（类似 Go 语言里字段/方法遮蔽规则）。
-2. **未导出的匿名非 struct 字段会被忽略**（因为无法从包外访问）。
-3. **同一层出现同名冲突**（比如两个匿名字段都提升出一个 `Name`）：
-   - 如果只有一个字段显式写了 tag，tag 优先，冲突消解为那个字段；
-   - 如果都写了/都没写 tag，这些字段全部丢弃，谁都不参与编解码（Go 的"二义性即不存在"哲学）。
-4. 解析出的每个 `field` 会预先计算好：JSON 转义后的字段名（HTML 转义/非转义两个版本）、`omitempty`/`omitzero`/`string` 等选项、字段访问路径 `index []int`（支持多级嵌入）、对应的 `encoderFunc`。
-
-这一整套解析只做一次，后续所有该类型的 Marshal/Unmarshal 都复用缓存结果，是 `encoding/json` 反射开销可控的关键设计。
+对 slice：解码器重置长度并逐个追加元素，容量不足时扩容，不会按原 slice 长度丢弃多余元素。对固定数组 `[N]T`：超出 N 的 JSON 元素会丢弃，输入不足 N 时剩余位置设为零值。
 
 ---
 
-## 五、流式编解码：Decoder / Encoder
+<a id="topic-20"></a>
 
-`json.Marshal`/`json.Unmarshal` 是"一次性、全量在内存"的 API：入参/出参都是完整的 `[]byte`。
-`json.NewDecoder(r io.Reader)`/`json.NewEncoder(w io.Writer)` 则面向 `io.Reader`/`io.Writer`，适合：
-
-- 网络流（如 HTTP body）：不需要先 `io.ReadAll` 把整个 body 读进内存再 `Unmarshal`，可以边读边解析，节省内存、降低延迟。
-- 连续多个 JSON 值（JSON Lines / streaming JSON）：同一个 `Decoder` 反复调用 `Decode()` 可以依次读出多个顶层 JSON 值，配合 `More()` 判断是否还有下一个值。
-
-`Decoder` 内部维护一个 `bufio` 风格的缓冲区，`Decode` 时若当前 buffer 里的数据不足以构成一个完整 JSON 值，会调用 `refill()` 继续从底层 `io.Reader` 读取补充，而不是要求一次性传入完整数据。`Token()` 提供更底层的、按 token（`{`/`}`/`[`/`]`/key/value）遍历 JSON 的能力，用于流式处理超大 JSON 而不想一次性反射到具体的 struct。
-
-`Encoder.Encode(v)` 相当于 `Marshal(v)` 后再写入 `w`，并在末尾追加换行符 `\n`（这是和 `Marshal` 明确不同的行为），适合按行输出多个 JSON 对象。
-
-对比：
-
-|                           | 输入/输出               | 是否要求完整数据 | 典型场景                                                          |
-| ------------------------- | ----------------------- | ---------------- | ----------------------------------------------------------------- |
-| `Marshal`/`Unmarshal`     | `[]byte`                | 是               | 内存中已有的数据、需要拿到完整 `[]byte` 做其他处理（如计算 hash） |
-| `NewEncoder`/`NewDecoder` | `io.Writer`/`io.Reader` | 否，支持边读边解 | HTTP body、文件、多个连续 JSON 值                                 |
-
----
-
-## 六、encoding/json/v2 与 jsontext（实验性新一代实现）
+## 七、encoding/json/v2 与 jsontext（实验性新一代实现）
 
 Go 1.26 的 `GOROOT/src/encoding/json/` 下还带了两个新包：`encoding/json/v2`（语义层）和 `encoding/json/jsontext`（语法层），只有用 `GOEXPERIMENT=jsonv2` 编译时才会生效。开启后，**标准库的 `encoding/json`（v1 API：`Marshal`/`Unmarshal`/`Decoder`/`Encoder`）本身会变成一层薄封装，内部转调 `jsonv2` 实现**（对应源码里 `v2_encode.go`/`v2_decode.go`/`v2_stream.go`/`v2_tags.go` 这批带 `//go:build goexperiment.jsonv2` 构建约束的文件）。也就是说 v2 不是另起炉灶的平行包，而是准备将来替换掉 v1 内部实现的下一代版本，v1 的函数签名保持不变，行为可能因为默认值不同而略有差异。
 
-### 三层结构
+<a id="topic-21"></a>
+
+### 7.1 三层结构
 
 - **`encoding/json/jsontext`**（语法层，syntactic）：只关心 JSON 文本本身的语法——`Encoder`/`Decoder` 按 `Token`（`{`、`}`、`[`、`]`、字面量、字符串、数字）或完整的 `Value`（`[]byte`，一段完整合法的 JSON 值）读写，不涉及"这段 JSON 对应哪个 Go 类型"。
 - **`encoding/json/v2`**（语义层，semantic）：负责 Go 值 ↔ JSON 值的映射，`Marshal`/`Unmarshal` 建立在 `jsontext` 之上，另有 `MarshalWrite`/`UnmarshalRead`（对接 `io.Writer`/`io.Reader`）、`MarshalEncode`/`UnmarshalDecode`（直接对接 `jsontext.Encoder`/`Decoder`，可以插在别的编码流程中间）。
@@ -248,7 +331,9 @@ Go 1.26 的 `GOROOT/src/encoding/json/` 下还带了两个新包：`encoding/jso
 
 这套"语法/语义分层"是 v2 相对 v1 最大的架构变化：v1 里 scanner（语法扫描）和 decodeState（语义赋值）是耦合在一个内部包里的，v2 把语法层独立导出成 `jsontext`，使得"只处理 token 流、不反射到具体类型"这类需求（比如透传/转发 JSON、只改其中一个字段再转发）可以直接用 `jsontext.Encoder`/`Decoder`，不必先反序列化成 struct 再序列化回去。
 
-### 更安全的默认行为（v1 vs v2）
+<a id="topic-22"></a>
+
+### 7.2 更安全的默认行为（v1 vs v2）
 
 v2 文档专门有一节 "Security Considerations"，明确列出了几个 v1/v2 默认值不同、且容易被利用做协议混淆攻击（同一份 JSON 被两个服务解析出不同语义）的地方：
 
@@ -261,7 +346,9 @@ v2 文档专门有一节 "Security Considerations"，明确列出了几个 v1/v2
 
 可以看到 v2 选择的默认值整体更"严格"、更不容易产生歧义，这也是标准库明确写在文档里、建议新代码优先使用 v2 的原因之一。
 
-### struct tag 的变化
+<a id="topic-23"></a>
+
+### 7.3 struct tag 的变化
 
 v2 里 `json` tag 语法整体沿用逗号分隔，但语义更明确、也新增了几个选项：
 
@@ -273,7 +360,9 @@ v2 里 `json` tag 语法整体沿用逗号分隔，但语义更明确、也新�
 
 字段名冲突消解规则和 v1 基本一致（BFS 找同名字段，浅层优先，同层冲突看谁显式打了 tag），但要求非内联字段的 JSON 名字必须唯一，否则会直接报 `SemanticError`，而不是像 v1 那样"冲突就全部丢弃、静默忽略"。
 
-### 接口与自定义序列化的新能力
+<a id="topic-24"></a>
+
+### 7.4 接口与自定义序列化的新能力
 
 v2 把 v1 的 `MarshalJSON()([]byte, error)` / `UnmarshalJSON([]byte) error` 保留下来（分别叫 `Marshaler`/`Unmarshaler`），但新增了效率更高的版本：
 
@@ -299,7 +388,9 @@ json.Marshal(v, opts)
 
 `MarshalFunc[T]`/`MarshalToFunc[T]`/`UnmarshalFunc[T]`/`UnmarshalFromFunc[T]` 允许调用方针对某个具体类型 `T`（哪怕是第三方包里的类型，没法给它加方法）注入自定义编解码逻辑，通过 `Options` 参数传进 `Marshal`/`Unmarshal`，而不用像 v1 那样只能靠"给类型定义方法"或者"包一层 wrapper 类型"来定制。
 
-### 函数式 Options
+<a id="topic-25"></a>
+
+### 7.5 函数式 Options
 
 v1 的行为定制主要靠 struct tag 加 `Encoder`/`Decoder` 上少数几个方法（`SetIndent`、`DisallowUnknownFields`、`UseNumber`）。v2 统一成一套**可组合的 `Options` 参数**，直接传给 `Marshal`/`Unmarshal` 等函数：
 
@@ -310,13 +401,17 @@ json.Unmarshal(data, &v, json.RejectUnknownMembers(true))
 
 `Options` 本质上是一组"属性名 → 值"的集合（类似不可变 map），`JoinOptions` 可以把多组选项合并，后设置的覆盖先设置的；`GetOption` 可以在自定义 Marshaler 内部读取当前生效的选项。这让"全局默认行为"和"某次调用的临时行为"都能用同一套 API 表达，不需要像 v1 那样为每个新行为单独加一个 `Decoder` 方法。
 
-### 现状与建议
+<a id="topic-26"></a>
+
+### 7.6 现状与建议
 
 截至 Go 1.26，`encoding/json/v2` 和 `encoding/json/jsontext` 仍标注为**实验性（experimental）**，不在 Go 1 兼容性承诺范围内，API 后续可能调整，必须显式加 `GOEXPERIMENT=jsonv2` 编译标记才存在。标准库文档的建议是：新代码如果不受历史行为约束，优先直接使用 `encoding/json/v2`（默认值更安全），存量代码继续用 `encoding/json`（v1），等 v2 稳定转正后再迁移。
 
 ---
 
-## 七、面试问题
+<a id="topic-27"></a>
+
+## 八、面试问题
 
 1. **`json.Marshal` 对未导出字段（小写字段名）会怎么处理？为什么？**
    答：完全忽略，不会出现在输出中。因为 `reflect` 包无法读取/设置未导出字段的值（`CanInterface()`/`CanSet()` 为 false），`encoding/json` 在 `typeFields` 阶段就跳过了未导出字段。

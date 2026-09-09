@@ -1,7 +1,7 @@
 // mem 示例：对应 notes/mem.md
 // 运行：go run ./mem
 // 看逃逸分析：go build -gcflags='-m -l' ./mem 2>&1 | grep -E 'escapes|moved to heap|does not escape'
-// 看栈增长：GODEBUG=... 见 mem.md 3.x；压测：go test -bench . -benchmem ./mem
+// 看栈增长：见 mem.md#topic-3；压测：go test -bench . -benchmem ./mem
 package main
 
 import (
@@ -344,7 +344,7 @@ func fixedSizeSlice() int {
 
 //go:noinline
 func dynamicSizeSlice(n int) int {
-	s := make([]int, n) // 长度不是编译期常量 -> 必须堆分配
+	s := make([]int, n) // 分配位置取决于编译器对大小与逃逸的分析
 	s[0] = 1
 	return s[0]
 }
@@ -360,15 +360,15 @@ func escapeSliceMap() {
 	section("2.4 slice/map 的逃逸")
 
 	fmt.Println("  make([]int, 64)     不逃逸 -> 栈上（编译期常量长度 + 不超上限）")
-	fmt.Println("  make([]int, n)      逃逸   -> 长度未知，编译器不敢在栈上开")
+	fmt.Println("  make([]int, n)      不能只凭动态长度判断；用 -gcflags=-m=2 查看当前编译结果")
 	fmt.Println("  make([]int, 10000)  逃逸   -> 单个栈对象上限约 64KB（implicit variable too large）")
 	_ = fixedSizeSlice()
 	_ = dynamicSizeSlice(64)
 	_ = hugeSlice()
 
-	fmt.Println("→ append 扩容出来的新底层数组永远在堆上")
-	fmt.Println("→ map 无论多小都在堆上（hmap 里有指针，且大小不定）")
-	fmt.Println("→ 所以'预分配 + 复用'比'指望逃逸分析'靠谱得多")
+	fmt.Println("→ 走 runtime.growslice 的扩容分配堆数组；调用是否被优化需结合编译结果判断")
+	fmt.Println("→ 不逃逸时，Map 结构和小 map 的首个 group 可以在栈上；扩容后的存储另行分配")
+	fmt.Println("→ 预分配与复用的收益需要结合逃逸诊断和 benchmark 判断")
 }
 
 // ---------------------------------------------------------------------------

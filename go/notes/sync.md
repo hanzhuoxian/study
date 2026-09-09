@@ -1,5 +1,18 @@
 # sync
 
+> 定位：同步原语的选型、实现与误用。
+> 前置知识：[Channel](chan.md)。
+> 配套示例：[sync/main.go](sync/main.go)（`go run ./sync`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [常见陷阱](#topic-3)；深入实现或进阶用法时读 [底层原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [底层原理](#topic-2)
+- [常见陷阱](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3`。这个包的实现在最近几个版本被大改过，网上绝大多数中文资料还停留在 1.20 之前，注意版本：
 > - **1.9**：引入 `sync.Map`（read/dirty 双 map + misses 提升）。
 > - **1.18**：`Mutex.TryLock`、`RWMutex.TryLock`、`RWMutex.TryRLock`。
@@ -9,7 +22,20 @@
 >
 > 源码位置：`sync/{mutex,rwmutex,waitgroup,once,oncefunc,cond,map}.go`、`internal/sync/{mutex,hashtriemap}.go`、`runtime/sema.go`。配套代码：`notes/sync/`。
 
+<a id="topic-1"></a>
+
 ## 一、基础使用
+
+| 原语 | 用法 | 实现 | 排错 |
+| --- | --- | --- | --- |
+| Mutex | [互斥](#section-1-1) | [状态与 Lock](#section-2-1) | [拷贝锁](#section-3-1)、[锁粒度](#section-3-4) |
+| RWMutex | [读写锁](#section-1-2) | [读写计数](#section-2-5) | [递归读锁](#section-3-3) |
+| WaitGroup | [任务等待](#section-1-3) | [计数与唤醒](#section-2-6) | [误用](#section-3-6) |
+| Once | [一次初始化](#section-1-4) | [发布顺序](#section-2-7) | [重入与失败](#section-3-5) |
+| Cond | [条件等待](#section-1-5) | [ticket](#section-2-8) | [用法中的条件循环](#section-1-5) |
+| Map | [并发 Map](#section-1-6) | [hash-trie](#section-2-9) | [重复计算](#section-3-8)、[使用边界](#section-3-9) |
+
+<a id="section-1-1"></a>
 
 ### 1.1 Mutex
 
@@ -28,10 +54,12 @@ func (c *counter) Inc() {
 
 几条容易被忽略的语义：
 
-- **零值可用**，没有 `NewMutex`；也不能拷贝（见 3.1）。
+- **零值可用**，没有 `NewMutex`；也不能拷贝（见 [拷贝锁（最高频的并发 bug）](#section-3-1)）。
 - **锁不绑定 goroutine**：A 加锁、B 解锁是合法的（文档明确写了）。因此 Go 的 `Mutex` **不可重入**，同一个 goroutine 再 `Lock` 就是自死锁——运行时甚至不认为这是错误，只是永远等下去（单 goroutine 时会被死锁检测器抓到 `all goroutines are asleep - deadlock!`，多 goroutine 时通常不会）。
-- **`Unlock` 一个没加锁的 mutex 是 `fatal error`，不是 `panic`**，`recover` 拦不住（见 3.2）。
+- **`Unlock` 一个没加锁的 mutex 是 `fatal error`，不是 `panic`**，`recover` 拦不住（见 [`fatal error` 不是 `panic`](#section-3-2)）。
 - `TryLock` 存在但文档明确劝退：*correct uses of TryLock do exist, they are rare, and use of TryLock is often a sign of a deeper problem*。
+
+<a id="section-1-2"></a>
 
 ### 1.2 RWMutex
 
@@ -49,6 +77,8 @@ rw.Lock();   defer rw.Unlock()   // 写：独占
 3. **不能升级/降级**：`RLock` 不能变 `Lock`，`Lock` 也不能变 `RLock`。
 
 `readerCount` 上限 `rwmutexMaxReaders = 1<<30`，所以最多约 10.7 亿并发读者。
+
+<a id="section-1-3"></a>
 
 ### 1.3 WaitGroup
 
@@ -86,6 +116,8 @@ func (wg *WaitGroup) Go(f func()) {
 
 原因写在注释里：如果调了 `Done`，`Wait` 会被解除阻塞，main goroutine 可能抢在 panic 打印完之前 `os.Exit(0)`，把崩溃现场吞掉。
 
+<a id="section-1-4"></a>
+
 ### 1.4 Once 家族
 
 ```go
@@ -100,6 +132,8 @@ var conn, err = sync.OnceValues(dial)()          // 两个返回值
 - 四者都保证 `f` **只执行一次，且返回时 `f` 已经执行完**（不是"已经开始执行"）。
 - **`f` panic 之后不会重试**：`Once.Do` 里 `defer o.done.Store(true)` 在 panic 展开时也会执行。`OnceFunc`/`OnceValue` 更进一步——把 panic 值记下来，**之后每次调用都 panic 同一个值**。
 - 需要"失败可重试的初始化"就别用 `Once`，用 `errgroup`/`singleflight` 或自己写"失败时重置状态"的逻辑。
+
+<a id="section-1-5"></a>
 
 ### 1.5 Cond
 
@@ -119,6 +153,8 @@ func (q *queue) Pop() (int, bool) {
 - `Signal` 唤醒一个，`Broadcast` 唤醒全部；**都不需要持锁**，但持锁调用更容易推理。
 - **没有带超时的 Wait**。要超时就换 channel + `select`，或者用 `context`。
 - 实践建议：Go 里 `Cond` 的使用场景比其他语言少得多，多数"等条件"都能用 channel 表达得更清楚。标准库自己只在 `net`、`database/sql` 等少数地方用它。
+
+<a id="section-1-6"></a>
 
 ### 1.6 sync.Map
 
@@ -142,6 +178,8 @@ m.Clear()                                 // 1.23+
 2. 多个 goroutine 读写**互不相交**的 key 集合。
 
 其他情况优先用 `map` + `RWMutex`，或者分片锁。注意 `sync.Map` **没有 `Len()`**——真要计数只能 `Range` 数，而且数出来的值天生过时。
+
+<a id="section-1-7"></a>
 
 ### 1.7 选型：实测数字
 
@@ -182,7 +220,11 @@ BenchmarkOnceValue-8                      4.05 ns/op
 - **伪共享的代价是实打实的**：同样的分片计数器，加不加 64 字节 padding 差 7.7 倍。
 - 结论顺序：**能用 atomic 就别用锁；能分片就别用全局锁；能不共享就别共享**。
 
+<a id="topic-2"></a>
+
 ## 二、底层原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 Mutex 的数据结构与状态位
 
@@ -211,6 +253,8 @@ const (
     starvationThresholdNs = 1e6 // 1ms
 )
 ```
+
+<a id="section-2-2"></a>
 
 ### 2.2 Lock 的三段路径
 
@@ -268,6 +312,8 @@ starving = starving || nanotime()-waitStartTime > starvationThresholdNs
 
 即使有饥饿模式兜底，单次等待仍可能到十几毫秒——**饥饿模式保证的是"不会无限期饿死"，不是"低延迟"**。
 
+<a id="section-2-3"></a>
+
 ### 2.3 Unlock：为什么快路径是 Add 而不是 CAS
 
 ```go
@@ -285,6 +331,8 @@ func (m *Mutex) Unlock() {
 - 饥饿模式：`Semrelease(&m.sema, true, 2)`——**handoff = true**，直接把所有权交给队首，并让出时间片。注意此时 `mutexLocked` 并没有被置上，靠 `mutexStarving` 挡住新来的。
 
 `unlockSlow` 第一件事是检查 `(new+mutexLocked)&mutexLocked == 0` → `fatal("sync: unlock of unlocked mutex")`。
+
+<a id="section-2-4"></a>
 
 ### 2.4 sema：等待队列长什么样
 
@@ -312,8 +360,10 @@ func (t *semTable) rootFor(addr *uint32) *semaRoot {
 要点：
 
 - **按 `&m.sema` 的地址哈希到 251 个桶**，桶内是 treap（O(log n) 找到具体地址），**同一个地址上的多个等待者挂成 O(1) 的链表**（`sudog.waitlink`）。两层结构是为了修 `issue 17953`：大量不同 mutex 哈希到同一个桶时，退化成 O(n)。
-- 挂起的是 **G 不是线程**：`sudog` 里存着 `g`，M 会去跑别的 G（和 channel 阻塞是同一套机制，见 chan.md 2.7）。
+- 挂起的是 **G 不是线程**：`sudog` 里存着 `g`，M 会去跑别的 G（和 channel 阻塞是同一套机制，见 [阻塞与唤醒：挂起的是 G，不是线程](chan.md#section-2-7)）。
 - 所以**锁竞争的真实代价 = 一次 G 切换 + 一次 semtable 加锁 + 可能的 cache line 弹跳**，这就是为什么 59ns 的争抢版本比 18ns 的无争抢版本贵 3 倍多。
+
+<a id="section-2-5"></a>
 
 ### 2.5 RWMutex：一个原子变量搞定读写互斥
 
@@ -356,6 +406,8 @@ func (rw *RWMutex) RUnlock() {
 - `readerWait` 和 `readerCount` 必须分开：前者是"写者还要等几个"，后者是"当前有几个读者（含排队的）"。
 - `Unlock` 里 `readerCount.Add(rwmutexMaxReaders)` 恢复，然后按数量 `Semrelease` 唤醒所有排队读者，最后才 `rw.w.Unlock()` 放行下一个写者——**读者优先于下一个写者被唤醒**，避免写者连续霸占。
 
+<a id="section-2-6"></a>
+
 ### 2.6 WaitGroup：一个 uint64 装三样东西
 
 ```go
@@ -373,6 +425,8 @@ type WaitGroup struct {
 - counter 归零时，`Add` 负责把 `state` 清零并 `Semrelease` 唤醒所有 waiter。
 - counter 变负 → `panic("sync: negative WaitGroup counter")`（**这个是 panic，可以 recover**，和 Mutex 的 fatal 不同）。
 - `Wait` 返回前又被 `Add` → `panic("sync: WaitGroup misuse: Add called concurrently with Wait")`。
+
+<a id="section-2-7"></a>
 
 ### 2.7 Once：为什么必须是"双检查 + 延后置位"
 
@@ -401,6 +455,8 @@ if o.done.CompareAndSwap(false, true) { f() }   // ✗ 错的
 
 它保证了"只执行一次"，但**不保证"Do 返回时 f 已执行完"**：并发时输家会立刻返回，然后用到还没初始化好的东西。这是 `Once` 语义中最容易被自己实现错的一点。
 
+<a id="section-2-8"></a>
+
 ### 2.8 Cond：ticket 机制
 
 `Cond` 的等待队列是 `runtime.notifyList`（`runtime/sema.go:547`）：
@@ -417,6 +473,8 @@ type notifyList struct {
 `Wait` 的三步：`runtime_notifyListAdd` 领票号 → `c.L.Unlock()` → `runtime_notifyListWait(t)` 挂起。票号机制解决的是"**领票之后、真正挂起之前，Signal 就来了**"这个竞态：`notifyListWait` 里先判 `less(t, l.notify)`，如果自己的票已经被叫过就直接返回，不会丢通知。
 
 `Cond` 还有个 `copyChecker`（`sync/cond.go:97`）：它把自己的地址存在自己里面，一旦被拷贝，地址就对不上，`panic("sync.Cond is copied")`。这是 sync 包里少见的**运行时**拷贝检测（`Mutex` 的 `noCopy` 只是给 `go vet` 看的静态标记）。
+
+<a id="section-2-9"></a>
 
 ### 2.9 sync.Map：1.24 之后是 concurrent hash-trie
 
@@ -459,6 +517,8 @@ type entry[K, V] struct {        // 叶子节点
 
 顺带一提：`unique` 包（1.23 的 `unique.Handle`）和 `weak` 指针也建立在这个 hash-trie 上，这才是它被写出来的初衷，`sync.Map` 是搭便车换掉了实现。
 
+<a id="section-2-10"></a>
+
 ### 2.10 关键源码索引
 
 | 位置 | 内容 |
@@ -475,7 +535,11 @@ type entry[K, V] struct {        // 叶子节点
 | `sync/oncefunc.go:11,46,80` | `OnceFunc`/`OnceValue`/`OnceValues` 的 panic 缓存 |
 | `internal/sync/hashtriemap.go:21,63,530,541,564` | hash-trie 结构、`Load`、`nChildren`、`indirect`、`entry` |
 
+<a id="topic-3"></a>
+
 ## 三、常见陷阱
+
+<a id="section-3-1"></a>
 
 ### 3.1 拷贝锁（最高频的并发 bug）
 
@@ -502,6 +566,8 @@ range var c copies lock value
 
 `sync.Mutex` 里那个 `noCopy` 字段就是给 vet 看的标记（它实现了 `Lock`/`Unlock` 方法，因此被 vet 识别为"锁"），没有任何运行时作用。规则：**含锁的 struct 一律用指针传递**。
 
+<a id="section-3-2"></a>
+
 ### 3.2 `fatal error` 不是 `panic`
 
 ```go
@@ -523,6 +589,8 @@ sync 包里区分得很清楚：
 
 用 `fatal` 的理由：锁状态已经不自洽了，继续跑只会产生更难查的数据竞争。
 
+<a id="section-3-3"></a>
+
 ### 3.3 RWMutex 递归读锁
 
 ```go
@@ -534,6 +602,8 @@ func (s *Store) Get(k string) string {
 ```
 
 只要在两次 `RLock` 之间挤进一个 `Lock`，就是死锁：内层 `RLock` 等写者，写者等外层 `RUnlock`。**这个 bug 在低并发下几乎不复现**。解法是约定"带 `Locked` 后缀的方法假设调用者已持锁"，或者干脆用 `Mutex`。
+
+<a id="section-3-4"></a>
 
 ### 3.4 锁粒度：`defer Unlock` 会把慢操作圈进临界区
 
@@ -557,6 +627,8 @@ c.mu.Unlock()
 ```
 
 正确做法：锁内只拷一份回调列表，锁外再调。
+
+<a id="section-3-5"></a>
 
 ### 3.5 Once 相关
 
@@ -582,6 +654,8 @@ func DB() *sql.DB {
 
 要重试就别用 `Once`：自己写 `mu + inited bool`，失败时不置位。
 
+<a id="section-3-6"></a>
+
 ### 3.6 WaitGroup 的四种误用
 
 ```go
@@ -596,6 +670,8 @@ func run(wg sync.WaitGroup) { defer wg.Done() }   // vet: passes lock by value
 ```
 
 1.25 之后前两个基本被 `wg.Go(f)` 消灭了，优先用它。
+
+<a id="section-3-7"></a>
 
 ### 3.7 goroutine 泄漏 vs 锁泄漏
 
@@ -612,6 +688,8 @@ go tool pprof http://.../debug/pprof/block   # 需要 runtime.SetBlockProfileRat
 
 这也是"能用 `defer Unlock` 就用"和"临界区要短"之间的真实张力：**优先保证正确性（defer），再靠拆函数来缩小临界区**。
 
+<a id="section-3-8"></a>
+
 ### 3.8 sync.Map 的 `LoadOrStore` 会白算一次
 
 ```go
@@ -620,12 +698,16 @@ m.LoadOrStore("k", expensive())   // ✗ expensive() 是实参，先求值再传
 
 实测 8 个 goroutine 并发调用，`expensive()` 被调了 8 次，只有 1 次的结果被存下来。想"只构造一次"：先 `Load`，miss 了再 `LoadOrStore`；或者存 `*sync.OnceValue` 之类的惰性值；或者上 `singleflight`。
 
+<a id="section-3-9"></a>
+
 ### 3.9 把 sync.Map 当普通 map 用
 
 - **没有 `Len()`**：`Range` 数出来的值天生过时。
 - **`Range` 不是快照**：遍历期间的修改可能被看到、也可能看不到，且顺序不保证。
 - **key/value 是 `any`**：装箱开销 + 类型不安全。自己包一层泛型 wrapper（内部仍是 `sync.Map`，只是把断言收敛到一处）。
 - **不能拷贝**（`noCopy`）。
+
+<a id="section-3-10"></a>
 
 ### 3.10 用 channel 当锁
 
@@ -638,6 +720,8 @@ sem <- struct{}{}
 
 能跑，但实测 42ns vs `Mutex` 18ns，**贵一倍多**，而且没有饥饿模式保证、没有 `go vet` 支持、栈上看不出是在等锁。channel 适合传递**所有权和数据**，不适合当纯互斥量。反过来，"限制并发数"这种带计数的场景 channel 才是对的（`sync` 里没有 Semaphore，官方在 `golang.org/x/sync/semaphore`）。
 
+<a id="section-3-11"></a>
+
 ### 3.11 伪共享（false sharing）
 
 ```go
@@ -647,7 +731,9 @@ type stats struct {
 }
 ```
 
-两个字段被不同核高频写时，cache line 在核间反复弹跳。实测 64 个分片计数器，加 padding 2.23ns/op、不加 17.24ns/op，**差 7.7 倍**。解法是 padding 到 cache line 大小（runtime 里 `semtable` 和 `sync.Pool` 的 `poolLocal` 都是这么干的，见 pool.md 2.3）。
+两个字段被不同核高频写时，cache line 在核间反复弹跳。实测 64 个分片计数器，加 padding 2.23ns/op、不加 17.24ns/op，**差 7.7 倍**。解法是 padding 到 cache line 大小（runtime 里 `semtable` 和 `sync.Pool` 的 `poolLocal` 都是这么干的，见 [为什么 poolLocal 要填充到 128 字节](pool.md#section-2-3)）。
+
+<a id="section-3-12"></a>
 
 ### 3.12 该用锁的地方用了 atomic
 
@@ -659,6 +745,8 @@ avg := total.Load() / count.Load()   // ✗ 两次 Load 之间可能被改，得
 ```
 
 atomic 只保证**单个变量**的单次操作原子，**多个变量的一致性必须靠锁**（或者把它们塞进一个 struct 用 `atomic.Pointer` 整体换）。
+
+<a id="section-3-13"></a>
 
 ### 3.13 `sync` 之外的常用件
 
@@ -672,58 +760,60 @@ atomic 只保证**单个变量**的单次操作原子，**多个变量的一致�
 
 `errgroup` 几乎是"并发调 N 个下游"的默认答案，比手写 `WaitGroup + errChan` 少一半代码。
 
+<a id="topic-4"></a>
+
 ## 四、常见面试题
 
 **1. `sync.Mutex` 的两种模式是什么？为什么需要饥饿模式？**
-正常模式下等待者被唤醒后要和新来的 goroutine 竞争，新来的已经在 CPU 上跑、还能自旋，所以经常赢——吞吐高，但等待者可能被反复插队。某个等待者等待超过 1ms 就把 mutex 切进饥饿模式：`Unlock` 直接把所有权交棒给队首（`Semrelease` handoff=true），新来的一律排队尾且不许自旋，从而限制尾延迟。拿到锁的是最后一个等待者、或本次等待不足 1ms 时退出饥饿模式（见 2.2）。
+正常模式下等待者被唤醒后要和新来的 goroutine 竞争，新来的已经在 CPU 上跑、还能自旋，所以经常赢——吞吐高，但等待者可能被反复插队。某个等待者等待超过 1ms 就把 mutex 切进饥饿模式：`Unlock` 直接把所有权交棒给队首（`Semrelease` handoff=true），新来的一律排队尾且不许自旋，从而限制尾延迟。拿到锁的是最后一个等待者、或本次等待不足 1ms 时退出饥饿模式（见 [Lock 的三段路径](#section-2-2)）。
 
 **2. `Mutex` 的 state 里有什么？为什么 `Unlock` 用 `Add` 而 `Lock` 用 `CAS`？**
-`state int32`：bit0 locked、bit1 woken、bit2 starving、bit3+ 等待者数。`Lock` 不知道当前状态，必须 CAS 才能保证"只有一个赢家"；`Unlock` 的调用者一定持锁，`mutexLocked` 位必然是 1，直接 `Add(-1)` 更便宜，之后判 `new != 0` 再决定是否唤人（见 2.1、2.3）。
+`state int32`：bit0 locked、bit1 woken、bit2 starving、bit3+ 等待者数。`Lock` 不知道当前状态，必须 CAS 才能保证"只有一个赢家"；`Unlock` 的调用者一定持锁，`mutexLocked` 位必然是 1，直接 `Add(-1)` 更便宜，之后判 `new != 0` 再决定是否唤人（见 [Mutex 的数据结构与状态位](#section-2-1)、[Unlock：为什么快路径是 Add 而不是 CAS](#section-2-3)）。
 
 **3. Go 的 Mutex 是可重入的吗？为什么不设计成可重入？**
 不可重入，同一 goroutine 二次 `Lock` 自死锁。原因：Go 的锁不记录持有者（文档明确"锁不与特定 goroutine 关联"，允许 A 锁 B 解），要支持重入就得存 goroutine 标识 + 计数，`Mutex` 会从 8 字节膨胀、快路径也不再是一次 CAS。Russ Cox 的观点更根本：需要重入通常意味着临界区划分错了。
 
 **4. goroutine 阻塞在 Mutex 上时，OS 线程也被阻塞了吗？**
-没有。`runtime_SemacquireMutex` 把 G 包进 `sudog` 挂到 `semtable` 的队列上并让出 M，M 去跑别的 G。等待队列是全局 251 个桶的哈希表，桶内 treap 按 `&m.sema` 排序，同地址的等待者串成链表（见 2.4）。
+没有。`runtime_SemacquireMutex` 把 G 包进 `sudog` 挂到 `semtable` 的队列上并让出 M，M 去跑别的 G。等待队列是全局 251 个桶的哈希表，桶内 treap 按 `&m.sema` 排序，同地址的等待者串成链表（见 [sema：等待队列长什么样](#section-2-4)）。
 
 **5. `RWMutex` 一定比 `Mutex` 快吗？**
-不一定。实测无竞争时 `RLock/RUnlock` 13.6ns vs `Lock/Unlock` 18.3ns，差距很小；写锁 31.5ns 反而比 `Mutex` 贵近一倍（内部第一步就是 `rw.w.Lock()`）。而且读路径也要原子改同一个 `readerCount`，多核下同样有 cache line 争抢。只有**临界区足够长、读远多于写**时 `RWMutex` 才明显划算（见 1.7）。
+不一定。实测无竞争时 `RLock/RUnlock` 13.6ns vs `Lock/Unlock` 18.3ns，差距很小；写锁 31.5ns 反而比 `Mutex` 贵近一倍（内部第一步就是 `rw.w.Lock()`）。而且读路径也要原子改同一个 `readerCount`，多核下同样有 cache line 争抢。只有**临界区足够长、读远多于写**时 `RWMutex` 才明显划算（见 [选型：实测数字](#section-1-7)）。
 
 **6. `RWMutex` 怎么防止写者被饿死？为什么读锁不能递归？**
-`Lock` 里 `readerCount.Add(-1<<30)` 把计数变负，后续 `RLock` 看到负数就去 `readerSem` 排队，即"写者 pending 时新读者一律等待"。副作用就是读锁不可递归：外层持读锁、中间来了写者、内层 `RLock` 排队 → 内层等写者、写者等外层，死锁（见 1.2、2.5）。
+`Lock` 里 `readerCount.Add(-1<<30)` 把计数变负，后续 `RLock` 看到负数就去 `readerSem` 排队，即"写者 pending 时新读者一律等待"。副作用就是读锁不可递归：外层持读锁、中间来了写者、内层 `RLock` 排队 → 内层等写者、写者等外层，死锁（见 [RWMutex](#section-1-2)、[RWMutex：一个原子变量搞定读写互斥](#section-2-5)）。
 
 **7. `WaitGroup` 为什么用一个 uint64 存状态？**
-`state` 高 32 位是 counter、低 31 位是 waiter 数（1.25 起中间 1 位是 synctest 标记）。一次 `atomic.Add` 就能同时更新/读到两个计数，避免"counter 归零"和"有新 waiter 进来"之间的竞态。counter 变负 panic，`Wait` 未返回就复用 panic `WaitGroup misuse`（见 2.6）。
+`state` 高 32 位是 counter、低 31 位是 waiter 数（1.25 起中间 1 位是 synctest 标记）。一次 `atomic.Add` 就能同时更新/读到两个计数，避免"counter 归零"和"有新 waiter 进来"之间的竞态。counter 变负 panic，`Wait` 未返回就复用 panic `WaitGroup misuse`（见 [WaitGroup：一个 uint64 装三样东西](#section-2-6)）。
 
 **8. `wg.Go(f)` 和手写 `wg.Add(1); go func(){defer wg.Done(); f()}()` 有什么区别？**
-语义基本一致，但 `wg.Go` 里如果 `f` panic，它**故意不调 `Done`**而是重新 panic——防止 `Wait` 被解除阻塞后 main 抢先 `os.Exit(0)` 把崩溃现场吞掉。所以用 `wg.Go` 的前提是 `f` 内部自己兜住 panic（见 1.3）。
+语义基本一致，但 `wg.Go` 里如果 `f` panic，它**故意不调 `Done`**而是重新 panic——防止 `Wait` 被解除阻塞后 main 抢先 `os.Exit(0)` 把崩溃现场吞掉。所以用 `wg.Go` 的前提是 `f` 内部自己兜住 panic（见 [WaitGroup](#section-1-3)）。
 
 **9. `sync.Once` 为什么不能用 `CompareAndSwap(false, true)` 实现？**
-那样只保证"f 只执行一次"，不保证"`Do` 返回时 f 已执行完"：并发时 CAS 的输家会立刻返回，拿到未初始化的状态。所以实现是"原子读 done 的快路径 + 锁内双检查 + `defer o.done.Store(true)` 延后置位"（源码注释里就写着这个反例，见 2.7）。
+那样只保证"f 只执行一次"，不保证"`Do` 返回时 f 已执行完"：并发时 CAS 的输家会立刻返回，拿到未初始化的状态。所以实现是"原子读 done 的快路径 + 锁内双检查 + `defer o.done.Store(true)` 延后置位"（源码注释里就写着这个反例，见 [Once：为什么必须是"双检查 + 延后置位"](#section-2-7)）。
 
 **10. `Once.Do` 里 panic 了会怎样？**
-`done` 仍然被置位（`defer` 在展开时执行），**初始化不会重试**，后续 `Do` 直接返回。`OnceFunc`/`OnceValue` 更明确：记住 panic 值，之后每次调用都 panic 同一个值。需要可重试的初始化不能用 `Once`（见 1.4、3.5）。
+`done` 仍然被置位（`defer` 在展开时执行），**初始化不会重试**，后续 `Do` 直接返回。`OnceFunc`/`OnceValue` 更明确：记住 panic 值，之后每次调用都 panic 同一个值。需要可重试的初始化不能用 `Once`（见 [Once 家族](#section-1-4)、[Once 相关](#section-3-5)）。
 
 **11. `sync.Cond` 的 `Wait` 为什么必须写在 for 循环里？**
-`Signal`/`Broadcast` 只表示"有事发生"，被唤醒时条件可能已被别的 goroutine 消费掉（虚假唤醒）。另外 `Wait` 必须持锁调用，内部会 `Unlock` 再挂起、返回前重新 `Lock`。实现上用 ticket（`notifyList.wait/notify`）解决"领票后、挂起前收到 Signal"的竞态（见 1.5、2.8）。
+`Signal`/`Broadcast` 只表示"有事发生"，被唤醒时条件可能已被别的 goroutine 消费掉（虚假唤醒）。另外 `Wait` 必须持锁调用，内部会 `Unlock` 再挂起、返回前重新 `Lock`。实现上用 ticket（`notifyList.wait/notify`）解决"领票后、挂起前收到 Signal"的竞态（见 [Cond](#section-1-5)、[Cond：ticket 机制](#section-2-8)）。
 
 **12. `sync.Map` 的底层实现是什么？（注意版本）**
-Go 1.24 起是 **concurrent hash-trie**（`internal/sync.HashTrieMap`）：16 路分支，`Load` 全程只做 `atomic.Pointer.Load` 完全无锁；写只锁目标叶子所在的那个内部节点；`entry` 不可变，更新靠 copy-on-write 换指针；`Clear` 直接换新根。1.23 及之前才是 read/dirty 双 map + misses 提升 + expunged 延迟删除那套（见 2.9）。
+Go 1.24 起是 **concurrent hash-trie**（`internal/sync.HashTrieMap`）：16 路分支，`Load` 全程只做 `atomic.Pointer.Load` 完全无锁；写只锁目标叶子所在的那个内部节点；`entry` 不可变，更新靠 copy-on-write 换指针；`Clear` 直接换新根。1.23 及之前才是 read/dirty 双 map + misses 提升 + expunged 延迟删除那套（见 [sync.Map：1.24 之后是 concurrent hash-trie](#section-2-9)）。
 
 **13. 什么场景该用 `sync.Map`，什么场景该用 `map + RWMutex`？**
-文档给的两类：key 写一次读多次的只增 cache；多 goroutine 操作互不相交的 key。其他情况优先 `map + RWMutex` 或分片锁——`sync.Map` 的 `any` 装箱、缺少 `Len()`、`Range` 无快照语义都是实际成本。不过 1.24 换成 hash-trie 之后它的写性能已经好很多，实测 50% 写仍快于 `RWMutex+map`（见 1.7、3.9）。
+文档给的两类：key 写一次读多次的只增 cache；多 goroutine 操作互不相交的 key。其他情况优先 `map + RWMutex` 或分片锁——`sync.Map` 的 `any` 装箱、缺少 `Len()`、`Range` 无快照语义都是实际成本。不过 1.24 换成 hash-trie 之后它的写性能已经好很多，实测 50% 写仍快于 `RWMutex+map`（见 [选型：实测数字](#section-1-7)、[把 sync.Map 当普通 map 用](#section-3-9)）。
 
 **14. 拷贝一个 `sync.Mutex` 会发生什么？为什么运行时不报错？**
-拷贝出来的是两把独立的锁，互斥完全失效，运行时**不会有任何提示**。防线只有编译期的 `go vet` copylocks（靠 `noCopy` 字段识别）。`sync.Cond` 是唯一有运行时拷贝检测的（`copyChecker`，`panic("sync.Cond is copied")`，见 3.1、2.8）。
+拷贝出来的是两把独立的锁，互斥完全失效，运行时**不会有任何提示**。防线只有编译期的 `go vet` copylocks（靠 `noCopy` 字段识别）。`sync.Cond` 是唯一有运行时拷贝检测的（`copyChecker`，`panic("sync.Cond is copied")`，见 [拷贝锁（最高频的并发 bug）](#section-3-1)、[Cond：ticket 机制](#section-2-8)）。
 
 **15. `Unlock` 一个未加锁的 mutex 会 panic 吗？**
-不是 panic，是 `fatal error: sync: unlock of unlocked mutex`，`recover` 无效、进程必死。sync 包里锁状态类错误都用 `fatal()`/`throw()`，只有 WaitGroup 计数、Cond 拷贝这类"用法错误"才用 `panic()`（见 3.2）。
+不是 panic，是 `fatal error: sync: unlock of unlocked mutex`，`recover` 无效、进程必死。sync 包里锁状态类错误都用 `fatal()`/`throw()`，只有 WaitGroup 计数、Cond 拷贝这类"用法错误"才用 `panic()`（见 [`fatal error` 不是 `panic`](#section-3-2)）。
 
 **16. 什么是伪共享？Go 里哪些地方在防它？**
-不同核高频写同一条 cache line 上的不同变量，导致 cache line 反复失效。实测分片计数器加/不加 64 字节 padding 差 7.7 倍。runtime 里 `semtable` 的每个桶、`sync.Pool` 的 `poolLocal` 都填充到 cache line 大小来规避（见 3.11、pool.md 2.3）。
+不同核高频写同一条 cache line 上的不同变量，导致 cache line 反复失效。实测分片计数器加/不加 64 字节 padding 差 7.7 倍。runtime 里 `semtable` 的每个桶、`sync.Pool` 的 `poolLocal` 都填充到 cache line 大小来规避（见 [伪共享（false sharing）](#section-3-11)、[为什么 poolLocal 要填充到 128 字节](pool.md#section-2-3)）。
 
 **17. 只有一个变量要保护，用 atomic 还是 Mutex？多个变量呢？**
-单变量单操作用 atomic（实测 7ns vs 18ns，竞争下 17.8ns vs 59.6ns）。多个变量要**一致快照**时必须用锁，或者把它们打包进一个 struct 用 `atomic.Pointer[T]` 整体替换。`total/count` 两次 `Load` 算平均值是典型错误（见 3.12）。
+单变量单操作用 atomic（实测 7ns vs 18ns，竞争下 17.8ns vs 59.6ns）。多个变量要**一致快照**时必须用锁，或者把它们打包进一个 struct 用 `atomic.Pointer[T]` 整体替换。`total/count` 两次 `Load` 算平均值是典型错误（见 [该用锁的地方用了 atomic](#section-3-12)）。
 
 **18. `errgroup` 比 `WaitGroup` 多了什么？**
-收集第一个非 nil error、内置 `context` 取消（`WithContext`：任一子任务出错就 cancel 其余）、`SetLimit(n)` 限制并发。它在 `golang.org/x/sync`，不在标准库，但基本是"并发调 N 个下游"的默认写法（见 3.13）。
+收集第一个非 nil error、内置 `context` 取消（`WithContext`：任一子任务出错就 cancel 其余）、`SetLimit(n)` 限制并发。它在 `golang.org/x/sync`，不在标准库，但基本是"并发调 N 个下游"的默认写法（见 [`sync` 之外的常用件](#section-3-13)）。

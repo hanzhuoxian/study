@@ -1,8 +1,27 @@
 # Slice
 
+> 定位：切片视图、共享数组与扩容。
+> 前置知识：变量、控制流与基本 Go 语法。
+> 配套示例：[slice/main.go](slice/main.go)（`go run ./slice`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [常见陷阱](#topic-3)；深入实现或进阶用法时读 [底层原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [底层原理](#topic-2)
+- [常见陷阱](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3`。扩容参数、`runtime.slice` 结构体等均以该版本源码（`runtime/slice.go`）为准，不同版本可能有细节差异（尤其是 1.18 前后的扩容阈值/因子）。
 
+<a id="topic-1"></a>
+
 ## 一、基础使用
+
+常用容器操作还可使用标准库 `slices`：`Clone` 复制切片、`Equal` 比较元素、`Sort` 排序、`Delete` 删除区间、`Grow` 预留容量。泛型签名见 [标准库泛型](generic.md#section-1-8)，返回迭代器的 API 见 [iter](iter.md#section-1-6)。
+
+<a id="section-1-1"></a>
 
 ### 1.1 声明与初始化
 
@@ -15,6 +34,8 @@ s5 := make([]int, 3, 10)   // len=3, cap=10
 s6 := make([]int, 0, 10)   // 常用于“预分配容量，逐步 append”的场景
 ```
 
+<a id="section-1-2"></a>
+
 ### 1.2 从数组/slice 切出新 slice
 
 ```go
@@ -24,7 +45,9 @@ s2 := arr[1:3:4]  // 三索引切片 low:high:max，len=2, cap=3（4-1）
 ```
 
 - `s[low:high]`：`len = high-low`，`cap = cap(s)-low`（默认延伸到底层数组末尾）。
-- `s[low:high:max]`（三索引/full slice expression）：显式限制 `cap = max-low`，常用于防止 `append` 污染共享的底层数组（见 4.3）。
+- `s[low:high:max]`（三索引/full slice expression）：显式限制 `cap = max-low`，常用于防止 `append` 污染共享的底层数组（见 [append 引发的“污染”](#section-3-2)）。
+
+<a id="section-1-3"></a>
 
 ### 1.3 append / copy
 
@@ -38,6 +61,8 @@ dst := make([]int, len(s))
 n := copy(dst, s)      // 返回实际拷贝的元素个数 = min(len(dst), len(src))
 ```
 
+<a id="section-1-4"></a>
+
 ### 1.4 range 遍历
 
 ```go
@@ -46,6 +71,8 @@ for i, v := range s {
     s[i] = v * 2 // 要修改原元素必须通过下标
 }
 ```
+
+<a id="section-1-5"></a>
 
 ### 1.5 多维 slice
 
@@ -56,6 +83,8 @@ for i := range grid {
 }
 ```
 
+<a id="section-1-6"></a>
+
 ### 1.6 字符串与 slice 互转
 
 ```go
@@ -64,7 +93,11 @@ r := []rune("你好")     // 按 UTF-8 解码后拷贝为 rune slice（每个 ru
 s := string(b)         // 同样会拷贝
 ```
 
+<a id="topic-2"></a>
+
 ## 二、底层原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 数据结构
 
@@ -81,10 +114,14 @@ type slice struct {
 - **值类型是这个三元组本身**，不是底层数组。函数传参、赋值、range 迭代变量赋值，拷贝的都只是这 24 字节（64 位下 8+8+8）的 header，底层数组不会被拷贝。
 - 正因为共享底层数组指针，**多个 slice 可能指向同一块内存**，通过其中一个修改元素会影响所有共享该数组的 slice（前提是索引在各自的 `[0, len)` 范围内）。
 
+<a id="section-2-2"></a>
+
 ### 2.2 slice 与 array 的关系
 
 - `array` 是值类型，长度是类型的一部分（`[5]int` 和 `[3]int` 是不同类型），赋值/传参会整体拷贝。
 - `slice` 是对某个数组一段连续区间的「视图」（descriptor），本身不持有数据。`make([]T, n)` 只是运行时帮你分配了一个匿名数组，再返回指向它的 slice。
+
+<a id="section-2-3"></a>
 
 ### 2.3 append 与扩容机制
 
@@ -128,14 +165,20 @@ func nextslicecap(newLen, oldCap int) int {
 
 1. **不是简单的“无脑翻倍”**：旧容量小于 256 时是 2 倍增长；达到 256 后，增长因子逐渐降到约 1.25 倍，是空间和拷贝次数之间的折中（1.18 版本之后才是这个平滑过渡策略，之前是 1024 为界直接从 2x 切到 1.25x）。
 2. `nextslicecap` 算出的只是「期望容量」，真正的最终容量还要经过 `roundupsize`：Go 的内存分配器（mallocgc）会把申请的字节数对齐到预定义的 **size class**，所以实际 `cap` 往往比期望值略大，且和元素大小相关（这就是为什么同样 append 逻辑，不同元素类型算出来的 cap 增长曲线不完全一致）。
-3. 扩容会导致：**新的底层数组、地址变化**，因此扩容之后，原来共享同一底层数组的其它 slice **不再和新 slice 共享内存**（见 4.3 的例子）。
+3. 扩容会导致：**新的底层数组、地址变化**，因此扩容之后，原来共享同一底层数组的其它 slice **不再和新 slice 共享内存**（见 [append 引发的“污染”](#section-3-2) 的例子）。
 4. `append` 必须用返回值赋值回原变量（`s = append(s, x)`），因为 slice header 本身是值传递，扩容后新的 `array/len/cap` 只有通过返回值才能让调用者感知到。
+
+<a id="section-2-4"></a>
 
 ### 2.4 copy 的语义
 
 `copy(dst, src)` 按 `min(len(dst), len(src))` 逐元素拷贝（对 `[]byte` 和 `string` 有特殊优化，用 `memmove`），不会自动扩容 `dst`，也允许 `dst` 和 `src` 有重叠（内部用 `memmove` 处理重叠区域，语义等价于先读完源再写，不会像手写循环那样在重叠时踩坏数据）。
 
+<a id="topic-3"></a>
+
 ## 三、常见陷阱
+
+<a id="section-3-1"></a>
 
 ### 3.1 共享底层数组导致的“意外修改”
 
@@ -144,6 +187,8 @@ a := []int{1, 2, 3, 4, 5}
 b := a[1:3]   // b = [2 3]，与 a 共享底层数组
 b[0] = 99     // a 变为 [1 99 3 4 5]
 ```
+
+<a id="section-3-2"></a>
 
 ### 3.2 append 引发的“污染”
 
@@ -160,6 +205,8 @@ fmt.Println(a)            // [0 0 100] —— a 被 b 的 append 污染了！
 
 - 使用三索引切片显式限制 `cap`，逼迫任何在该切片上的 append 都触发扩容：`b := a[:2:2]`，此时 `cap(b)==2==len(b)`，append 时必然重新分配，不会影响 `a`。
 - 或者需要独立数据时显式 `copy`。
+
+<a id="section-3-3"></a>
 
 ### 3.3 大 slice 截取小 slice 造成的内存泄漏
 
@@ -179,6 +226,8 @@ func getFirstMB(data []byte) []byte {
 }
 ```
 
+<a id="section-3-4"></a>
+
 ### 3.4 nil slice 与空 slice
 
 ```go
@@ -189,9 +238,13 @@ b := []int{}         // 非 nil，len(b)==0
 - 两者 `len`、`cap` 都是 0，`append` 行为一致，绝大多数场景可以互换使用。
 - 区别体现在：`== nil` 判断、`json.Marshal`（`nil` 编码为 `null`，`[]int{}` 编码为 `[]`）等场景。
 
+<a id="section-3-5"></a>
+
 ### 3.5 并发不安全
 
 多个 goroutine 并发 `append` 同一个 slice 变量（尤其是共享容量、可能触发扩容竞争）是不安全的，需要加锁或使用 `channel`/`sync` 原语保护；只读且不并发写的情况下才是安全的。
+
+<a id="topic-4"></a>
 
 ## 四、常见面试题
 
@@ -199,19 +252,19 @@ b := []int{}         // 非 nil，len(b)==0
 Array 是值类型，长度是类型的一部分，赋值/传参整体拷贝；slice 是对某段连续内存的引用视图（`{array, len, cap}` 三元组），赋值/传参只拷贝这个 header，共享底层数组。
 
 **2. slice 的底层数据结构是什么？**
-`struct { array unsafe.Pointer; len int; cap int }`，见 2.1。
+`struct { array unsafe.Pointer; len int; cap int }`，见 [数据结构](#section-2-1)。
 
 **3. len 和 cap 的区别？**
 `len` 是当前可访问的元素个数；`cap` 是从当前 `array` 起点到底层数组末尾还能容纳的元素个数上限（`cap >= len`）。
 
 **4. append 的扩容规则是什么？**
-先看新长度是否超过旧容量的 2 倍，超过则直接按需要的长度分配；否则：旧容量 < 256 时翻倍（2x），>= 256 时按约 1.25x 递增（`newcap += (newcap+3*256)>>2` 迭代到够用为止）；最终容量还会被 `roundupsize` 对齐到内存分配器的 size class，因此实际 cap 常比理论值略大。详见 2.3。
+先看新长度是否超过旧容量的 2 倍，超过则直接按需要的长度分配；否则：旧容量 < 256 时翻倍（2x），>= 256 时按约 1.25x 递增（`newcap += (newcap+3*256)>>2` 迭代到够用为止）；最终容量还会被 `roundupsize` 对齐到内存分配器的 size class，因此实际 cap 常比理论值略大。详见 [append 与扩容机制](#section-2-3)。
 
 **5. 为什么 append 必须写成 `s = append(s, x)`，而不能直接 `append(s, x)`？**
 `append` 参数和返回值都是 slice header 的值拷贝。若发生扩容，函数内部会生成新的 `array/len/cap`，只有通过返回值赋值回调用者的变量，才能让调用者看到新的底层数组和容量；否则调用者手里的还是旧 header，指向旧数组。
 
 **6. 两个 slice 共享同一个底层数组，其中一个 append 会不会影响另一个？**
-看 `cap` 是否够用：够用则直接原地写入，会“污染”其他共享该数组、且索引落在被写位置的 slice（3.2）；不够用则触发扩容分配新数组，二者之后不再共享内存，互不影响。
+看 `cap` 是否够用：够用则直接原地写入，会“污染”其他共享该数组、且索引落在被写位置的 slice（[append 引发的“污染”](#section-3-2)）；不够用则触发扩容分配新数组，二者之后不再共享内存，互不影响。
 
 **7. 如何避免 append 污染共享数组？**
 
@@ -219,7 +272,7 @@ Array 是值类型，长度是类型的一部分，赋值/传参整体拷贝；s
 - 需要真正独立的数据时用 `copy` 显式复制一份。
 
 **8. 从一个大 slice 截取出小 slice 长期持有，会有什么问题？如何解决？**
-底层数组不会因为只用了一部分而被回收，可能造成事实上的内存泄漏（3.3）。解决方式是 `copy` 出独立的小数组，断开与大数组的引用。
+底层数组不会因为只用了一部分而被回收，可能造成事实上的内存泄漏（[大 slice 截取小 slice 造成的内存泄漏](#section-3-3)）。解决方式是 `copy` 出独立的小数组，断开与大数组的引用。
 
 **9. `make([]T, len)` 和 `make([]T, len, cap)` 的区别？`new([]T)` 呢？**
 前者 `len==cap`；后者显式指定容量，通常用于预分配，减少后续 append 时的多次扩容拷贝。`new([]T)` 返回的是一个指向 nil slice 的指针（`*[]T`），实践中几乎不用，和 `make` 不是一回事。

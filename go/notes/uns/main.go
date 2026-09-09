@@ -155,7 +155,7 @@ func basicNewAPIs() {
 	// 1.20 unsafe.String / StringData / SliceData
 	b := []byte("hello")
 	str := unsafe.String(unsafe.SliceData(b), len(b))
-	fmt.Printf("  unsafe.String: %q（零拷贝，见 string.md 2.2）\n", str)
+	fmt.Printf("  unsafe.String: %q（零拷贝，见 string.md#section-2-2）\n", str)
 	fmt.Printf("  unsafe.StringData(%q) = %p\n", str, unsafe.StringData(str))
 	fmt.Printf("  unsafe.SliceData(b) = %p（两者相同: %v）\n",
 		unsafe.SliceData(b), unsafe.StringData(str) == unsafe.SliceData(b))
@@ -267,7 +267,7 @@ func trapUintptrStore() {
 	fmt.Println("  两个独立的失效原因：")
 	fmt.Println("    ① GC 回收：uintptr 不是引用，不保活对象（gc.md 2.2）")
 	fmt.Println("    ② 栈移动：goroutine 栈增长时会整体拷贝并修正**指针**，")
-	fmt.Println("       但 uintptr 是整数，不会被修正（mem.md 3.2 实测有 4 次栈搬家）")
+	fmt.Println("       但 uintptr 是整数，不会被修正（mem.md#section-3-2 实测有 4 次栈搬家）")
 	fmt.Println()
 	fmt.Println("  ✓ 唯一正确的形态：转换和算术在同一个表达式里，结果立刻变回 Pointer")
 	fmt.Println("      p = unsafe.Pointer(uintptr(p) + offset)")
@@ -394,7 +394,7 @@ func whenToUse() {
 	section("4. 该用与不该用")
 
 	fmt.Println("  ✓ 值得用：")
-	fmt.Println("    · 热路径上 KB 级以上的 []byte <-> string 零拷贝（string.md 2.2，实测 1650x）")
+	fmt.Println("    · 热路径上 KB 级以上的 []byte <-> string 零拷贝（string.md#section-2-2，实测 1650x）")
 	fmt.Println("    · 类型重新解释：math.Float64bits 这类位操作")
 	fmt.Println("    · 和 C / 系统调用 / mmap 内存互操作（syscall 模式 ④）")
 	fmt.Println("    · 序列化库里按偏移直接读写字段（避开 reflect 的开销）")

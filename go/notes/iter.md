@@ -1,8 +1,26 @@
 # Iter（range over func 与迭代器）
 
+> 定位：迭代器的使用、组合与编译期改写。
+> 前置知识：[函数](func.md)、[Slice](slice.md)、[Map](map.md)、[泛型](generic.md)。
+> 配套示例：[iter/main.go](iter/main.go)（`go run ./iter`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [进阶用法：Pull、组合子与单次消费](#advanced-usage) → [常见陷阱](#topic-3)；深入实现或进阶用法时读 [底层原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [进阶用法：Pull、组合子与单次消费](#advanced-usage)
+- [底层原理](#topic-2)
+- [常见陷阱](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3`。`range over func`（range-over-func）在 **Go 1.23 正式启用**（1.22 需要 `GOEXPERIMENT=rangefunc`），`iter` 包同版本引入。本文"底层原理"一节以 `cmd/compile/internal/rangefunc/rewrite.go`、`runtime/coro.go`、`iter/iter.go`、`internal/abi/rangefuncconsts.go` 源码为准。文中所有结论与压测数据均在该版本上实测。
 
+<a id="topic-1"></a>
+
 ## 一、基础使用
+
+<a id="section-1-1"></a>
 
 ### 1.1 range over func：三种合法签名
 
@@ -24,6 +42,8 @@ for k := range seq2 { }   // 合法：Seq2 可以只接收第一个值
 
 没有"三个及以上迭代变量"的形式；要传更多值就自己包一个 struct。
 
+<a id="section-1-2"></a>
+
 ### 1.2 iter.Seq / iter.Seq2
 
 标准库只给了两个类型别名级别的定义（`iter/iter.go`），没有任何"迭代器接口"：
@@ -40,6 +60,8 @@ type Seq2[K, V any] func(yield func(K, V) bool)
 3. **`yield` 返回 `false` 之后再调用它会 panic**。
 
 对外暴露 API 时应使用 `iter.Seq` / `iter.Seq2`，而不是自定义的等价函数类型，这样才能和标准库的适配器（`slices.Collect`、`maps.Insert` 等）互相拼接。
+
+<a id="section-1-3"></a>
 
 ### 1.3 写一个迭代器
 
@@ -90,6 +112,8 @@ for line, err := range Lines("a.txt") {
 }
 ```
 
+<a id="section-1-4"></a>
+
 ### 1.4 给自定义容器提供迭代器
 
 命名约定（`iter` 包文档给出的官方约定）：
@@ -129,6 +153,8 @@ func (r *Ring[V]) Backward() iter.Seq[V] {
 
 注意方法本身返回的是"迭代器"，不是"迭代结果"，所以 `r.All()` 是廉价的（只是构造一个闭包），真正的遍历发生在 `range` 里。
 
+<a id="section-1-5"></a>
+
 ### 1.5 循环体里的控制流
 
 在 range-over-func 的循环体中，下面这些都能正常工作，而且语义和普通 `for` 完全一致：
@@ -151,7 +177,9 @@ for x := range f {
 }
 ```
 
-代价是编译器要生成一套状态码来"逃出"闭包，见 2.2 / 2.4。
+代价是编译器要生成一套状态码来"逃出"闭包，见 [`#next`：break / return / goto 怎么"逃出"闭包](#section-2-2)、[嵌套循环](#section-2-4)。
+
+<a id="section-1-6"></a>
 
 ### 1.6 标准库里的迭代器 API
 
@@ -202,7 +230,13 @@ for _, k := range slices.Sorted(maps.Keys(m)) {
 }
 ```
 
-### 1.7 iter.Pull / Pull2：push 转 pull
+<a id="advanced-usage"></a>
+
+## 二、进阶用法：Pull、组合子与单次消费
+
+<a id="section-1-7"></a>
+
+### 2.1 iter.Pull / Pull2：push 转 pull
 
 `Seq` 是 **push 模型**：控制权在迭代器手里，它主动把值推给 `yield`。有些场景（归并两个序列、前瞻一个元素、由外部驱动）更适合 **pull 模型**：
 
@@ -248,7 +282,9 @@ func Zip[A, B any](a iter.Seq[A], b iter.Seq[B]) iter.Seq2[A, B] {
 }
 ```
 
-### 1.8 常用组合子
+<a id="section-1-8"></a>
+
+### 2.2 常用组合子
 
 标准库刻意没有提供 `Map`/`Filter`/`Take`（社区还在讨论中），自己写只有几行，模板固定：**外层返回一个闭包，内层 range 上游 seq，转发 `yield` 的返回值**。
 
@@ -321,7 +357,9 @@ sq := Map(Filter(Naturals(), func(n int) bool { return n%3 == 0 }),
 fmt.Println(slices.Collect(Take(sq, 5))) // [9 36 81 144 225]
 ```
 
-### 1.9 单次使用迭代器（single-use iterator）
+<a id="section-1-9"></a>
+
+### 2.3 单次使用迭代器（single-use iterator）
 
 大多数迭代器可以被 `range` 多次，每次都从头走一遍。但如果数据来自不可回退的流（网络、`bufio.Scanner`、`sql.Rows`），第二次遍历就什么都没有了：
 
@@ -338,9 +376,13 @@ slices.Collect(seq) // []   ← 第二次是空的
 
 这类迭代器**必须在文档注释里写明 "It returns a single-use iterator."**，否则调用方会踩坑。
 
-## 二、底层原理
+<a id="topic-2"></a>
 
-### 2.1 编译期改写：range-over-func 没有运行时
+## 三、底层原理
+
+<a id="section-2-1"></a>
+
+### 3.1 编译期改写：range-over-func 没有运行时
 
 range-over-func 完全是**前端语法改写**（`cmd/compile/internal/rangefunc/rewrite.go`，在 noder 之前跑，这样生成的函数还能被后端内联），运行时不参与调度。最朴素的情形：
 
@@ -374,7 +416,9 @@ f(func(#p1 T1, #p2 T2) bool {
 
 （生成的变量都以 `#` 开头，避免和用户变量重名，调试时一眼能认出来。）
 
-### 2.2 `#next`：break / return / goto 怎么"逃出"闭包
+<a id="section-2-2"></a>
+
+### 3.2 `#next`：break / return / goto 怎么"逃出"闭包
 
 `continue` → `return true`，`break` → `return false`，这两个最简单。但 `return`、`goto L`、带标签的 break/continue 要跳到闭包**外面**，闭包本身做不到，于是编译器引入一个整型状态码 `#next`：
 
@@ -395,7 +439,9 @@ f(func(#p1 T1, #p2 T2) bool {
 - 带返回值的 `return a, b`：外层函数的返回值先被改写成命名返回值 `#rv1, #rv2`，在闭包里赋值，再 `#next = -1; return false`；
 - 带标签的 `break L` / `continue L`：用**正数** `#next` 编码"要跳出第几层"，`perLoopStep*N` 表示 break 第 N 层，`perLoopStep*N-1` 表示 continue 第 N 层，逐层向外传播。
 
-### 2.3 `#stateN` 状态机：运行时怎么发现"坏迭代器"
+<a id="section-2-3"></a>
+
+### 3.3 `#stateN` 状态机：运行时怎么发现"坏迭代器"
 
 编译器给每个 range-over-func 循环生成一个 `#stateN` 变量，取值来自 `internal/abi`：
 
@@ -437,13 +483,17 @@ if #state1 == abi.RF_PANIC {              // 迭代器 recover 掉了 body 的 p
 | `RF_EXHAUSTED`     | `range function continued iteration after whole loop exit`                       |
 | `RF_MISSING_PANIC` | `range function recovered a loop body panic and did not resume panicking`        |
 
-注意状态机检查的是**调用时序**，不是"哪个 goroutine 在调用"。所以并发调用 `yield` 会命中 `RF_PANIC`（因为别人正在 body 里），而一个"严格串行、同步等待"的跨 goroutine 调用碰巧不会被抓到——但这不是规范保证的行为，不要依赖（见 3.3）。
+注意状态机检查的是**调用时序**，不是"哪个 goroutine 在调用"。所以并发调用 `yield` 会命中 `RF_PANIC`（因为别人正在 body 里），而一个"严格串行、同步等待"的跨 goroutine 调用碰巧不会被抓到——但这不是规范保证的行为，不要依赖（见 [把 `yield` 存起来 / 并发调用 / 传给别的 goroutine](#section-3-3)）。
 
-### 2.4 嵌套循环
+<a id="section-2-4"></a>
+
+### 3.4 嵌套循环
 
 编译器用**一次遍历**同时改写最外层 range-over-func 循环及其内部所有 range-over-func 循环（否则重写自身生成的代码会带来嵌套深度的平方级开销）。内层循环退出时只做 `if #next < 0 { return false }`，把"该真正 return 了"的信号继续往外层抛，由最外层统一执行。
 
-### 2.5 defer 的归属
+<a id="section-2-5"></a>
+
+### 3.5 defer 的归属
 
 循环体虽然被改写成了闭包，但里面写的 `defer` 仍然属于**外层函数**，不是这个闭包——运行时通过 `runtime.deferrangefunc` 把 defer 挂到原函数的链上。实测：
 
@@ -464,7 +514,9 @@ func() {
 
 也就是说在 range-over-func 循环体里写 `defer` 和在普通 `for` 里写一样危险：循环 100 万次就压 100 万个 defer，直到外层函数返回才释放。
 
-### 2.6 iter.Pull 的实现：coro，不是普通 goroutine
+<a id="section-2-6"></a>
+
+### 3.6 iter.Pull 的实现：coro，不是普通 goroutine
 
 `Pull` 需要"迭代器执行到一半，把控制权交还调用方，之后再从原地继续"——这是协程语义。实现靠 runtime 的三个内部函数（`iter` 包用 `//go:linkname` 拿到）：
 
@@ -493,7 +545,9 @@ next()  →  pull.yieldNext = true  →  coroswitch(c) ─┐
 - `yield` 被连续调用两次而中间没有 `next()`，会 panic `iter.Pull: yield called again before next`；`next()` 连续调用同理是 `iter.Pull: next called again before yield`（这是 race 检测之外的额外自检）；
 - coro 的切换比普通 goroutine 调度轻（`coroswitch_m` 的注释：快路径只有 3 个 CAS，因为切换频率预期比普通调度高一个数量级以上），但依然远贵于一次函数调用。
 
-### 2.7 内联与逃逸
+<a id="section-2-7"></a>
+
+### 3.7 内联与逃逸
 
 因为改写发生在前端，生成的 body 函数对后端来说就是普通闭包，**可以被内联，一般不逃逸**：
 
@@ -518,7 +572,9 @@ $ go build -gcflags='-m' .
 
 循环体被命名为 `sumAll-range1`，迭代器闭包不逃逸、零分配。但"不分配"不等于"零成本"，见下。
 
-### 2.8 性能：三种遍历方式的实测对比
+<a id="section-2-8"></a>
+
+### 3.8 性能：三种遍历方式的实测对比
 
 1024 个 `int` 的 slice 求和（`go1.26.3`，Intel i5-1038NG7）：
 
@@ -537,9 +593,13 @@ BenchmarkPull-8                      14074    85627   ns/op   256 B/op   7 alloc
 - `iter.Pull` 每个元素要做两次协程切换，量级完全不同——**只在确实需要 pull 语义时才用**（归并、前瞻、外部驱动），不要拿它当"更好写的 for"；
 - 抽象层数会叠加：`Map(Filter(...))` 每层都是一次闭包调用，链路长了开销线性增长。
 
-## 三、常见陷阱
+<a id="topic-3"></a>
 
-### 3.1 忽略 `yield` 的返回值
+## 四、常见陷阱
+
+<a id="section-3-1"></a>
+
+### 4.1 忽略 `yield` 的返回值
 
 最高频的错误。写迭代器时必须检查：
 
@@ -562,7 +622,9 @@ for v := range Bad(5) {
 
 `break` 让 `yield` 返回 `false`，但迭代器不理会，继续调用 `yield` → 状态机在 `RF_DONE` 状态上抓到 → panic。正确写法永远是 `if !yield(v) { return }`。
 
-### 3.2 迭代器把循环体的 panic recover 掉了
+<a id="section-3-2"></a>
+
+### 4.2 迭代器把循环体的 panic recover 掉了
 
 ```go
 func swallow() iter.Seq[int] {
@@ -583,7 +645,9 @@ for v := range swallow() {
 
 循环体的 panic 在语义上属于**调用方**，迭代器无权吞掉。要么不 recover，要么 recover 之后重新 panic。迭代器里的 `recover()` 只应该用于处理迭代器自己产生的 panic。
 
-### 3.3 把 `yield` 存起来 / 并发调用 / 传给别的 goroutine
+<a id="section-3-3"></a>
+
+### 4.3 把 `yield` 存起来 / 并发调用 / 传给别的 goroutine
 
 `yield` 只在当次调用期间有效。存下来以后再用、或多个 goroutine 同时调用，都会被状态机抓住：
 
@@ -606,7 +670,9 @@ func parallel() iter.Seq[int] {
 
 反过来，如果是"启动一个 goroutine 调 yield，然后同步等它结束"，时序上没有重叠，实测**不会**触发检查，甚至循环体里的 `return` 也能正常工作——但这是实现细节，规范上不保证，也和 `iter` 文档明确禁止的用法冲突。结论：**`yield` 只在调用迭代器的那个 goroutine 里、串行地调用**。
 
-### 3.4 `iter.Pull` 忘记 `stop()` → 泄漏一个 goroutine
+<a id="section-3-4"></a>
+
+### 4.4 `iter.Pull` 忘记 `stop()` → 泄漏一个 goroutine
 
 `Pull` 背后的 coro 就是一个阻塞着的 goroutine，**它不会被 GC 回收**（`newcoro` 创建的 g 一直可达且处于阻塞态）：
 
@@ -619,15 +685,21 @@ runtime.NumGoroutine()       // 依然是 2，泄漏了
 
 而且迭代器函数停在 `yield` 里，它的 `defer f.Close()` 也永远不会执行——文件句柄一起泄漏。规矩：**`next, stop := iter.Pull(seq)` 的下一行就写 `defer stop()`**。
 
-### 3.5 `next` / `stop` 不能并发调用
+<a id="section-3-5"></a>
+
+### 4.5 `next` / `stop` 不能并发调用
 
 `Pull` 内部没有任何锁（靠 coro 的独占语义），并发调用 `next` 是数据竞争，`-race` 下会直接报出来（`iter` 内部特意埋了 `race.Acquire/Release` 和一个 `racer` 字段来让竞争可被检测）。需要多消费者就自己在外面加锁，或者改用 channel。
 
-### 3.6 单次使用迭代器被消费两次
+<a id="section-3-6"></a>
 
-`iter.Seq` 只是个函数值，看起来像"集合"，但它可能只能走一遍（见 1.9）。常见事故：先 `slices.Collect(seq)` 统计一下数量，再 `for range seq` 处理——第二次是空的。要复用就先 `Collect` 成 slice。
+### 4.6 单次使用迭代器被消费两次
 
-### 3.7 把 `iter.Seq` 当集合用
+`iter.Seq` 只是个函数值，看起来像"集合"，但它可能只能走一遍（见 [单次使用迭代器（single-use iterator）](#section-1-9)）。常见事故：先 `slices.Collect(seq)` 统计一下数量，再 `for range seq` 处理——第二次是空的。要复用就先 `Collect` 成 slice。
+
+<a id="section-3-7"></a>
+
+### 4.7 把 `iter.Seq` 当集合用
 
 `Seq` 上没有 `len`、没有下标、不能随机访问，也不缓存结果：**每一次 `range` 都会把整条链路重新执行一遍**。
 
@@ -639,11 +711,15 @@ for v := range seq { ... }             // 又执行了一遍
 
 需要多次使用就 `Collect` 一次，把惰性序列固化成 slice。
 
-### 3.8 在遍历过程中修改底层容器
+<a id="section-3-8"></a>
+
+### 4.8 在遍历过程中修改底层容器
 
 迭代器只是普通函数，没有 `ConcurrentModificationException` 这种保护。`maps.Keys(m)` 底层就是 `for k := range m`，遍历中删 key 是安全的（Go map 的规则），但**新增** key 是否被遍历到是未定义的；`slices.Values(s)` 拿的是 range 开始时的 slice 头，遍历中 `append` 触发扩容后，迭代器看到的还是旧数组。要在遍历中修改，就按 `iter` 文档建议的做法：暴露一个"位置类型"的迭代器（`Seq[*Pos[V]]`），把 `Delete`/`Set` 定义成位置上的方法。
 
-### 3.9 只是为了好看而套一层迭代器
+<a id="section-3-9"></a>
+
+### 4.9 只是为了好看而套一层迭代器
 
 ```go
 // 没有任何收益：多了一层闭包调用，还慢了几倍
@@ -654,7 +730,9 @@ for i, v := range s { ... }
 
 `slices.All` 的价值在于**把 slice 适配成 `iter.Seq2` 传给通用函数**，而不是替代 `for range s`。同理，热路径上不要把 `for _, v := range s` 改写成 `for v := range slices.Values(s)`。
 
-### 3.10 忘了迭代器是"惰性"的：错误与 context 要显式传
+<a id="section-3-10"></a>
+
+### 4.10 忘了迭代器是"惰性"的：错误与 context 要显式传
 
 `iter.Seq` 的签名里没有 `error`，也没有 `context.Context`。约定的做法：
 
@@ -668,11 +746,15 @@ func Rows(ctx context.Context, ...) iter.Seq2[Row, error]
 
 不要把错误藏在闭包捕获的变量里让调用方"循环结束后自己去查"——很容易被忽略。如果一定要这么设计（类似 `bufio.Scanner.Err()`），必须在文档里写清楚。
 
-### 3.11 循环体里的 `defer` 堆积
+<a id="section-3-11"></a>
 
-见 2.5：range-over-func 循环体里的 `defer` 归属外层函数，不是"每轮结束就执行"。需要每轮清理就显式调用，或者包一层函数字面量。
+### 4.11 循环体里的 `defer` 堆积
 
-### 3.12 迭代器函数被当成"值"多次传递
+见 [defer 的归属](#section-2-5)：range-over-func 循环体里的 `defer` 归属外层函数，不是"每轮结束就执行"。需要每轮清理就显式调用，或者包一层函数字面量。
+
+<a id="section-3-12"></a>
+
+### 4.12 迭代器函数被当成"值"多次传递
 
 ```go
 seq := Count(3)   // 只是构造闭包，什么都没执行
@@ -680,7 +762,9 @@ seq := Count(3)   // 只是构造闭包，什么都没执行
 
 初学者常以为 `Count(3)` 已经产生了序列。实际上直到 `range` / `Collect` / `Pull` 才开始跑。这意味着：迭代器构造函数里做的参数校验、资源打开会**延迟**到遍历时才发生；如果要"立刻失败"，应该在构造函数里就返回 `(iter.Seq[T], error)`。
 
-## 四、常见面试题
+<a id="topic-4"></a>
+
+## 五、常见面试题
 
 **Q1：range over func 是运行时特性还是编译期特性？**
 纯编译期。前端 `rangefunc.Rewrite` 把 `for x := range f { body }` 改写成 `f(func(x T) bool { body; return true })`，运行时只提供 `panicrangestate` 这种错误报告和 `deferrangefunc` 这种 defer 归属修正。因此循环体可被内联，一般零分配。

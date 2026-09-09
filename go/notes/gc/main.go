@@ -404,7 +404,7 @@ func trapMemoryNotReturned() {
 	fmt.Println("  ③ /memory/classes/heap/free:bytes 大 -> 碎片或者峰值过后的空 span")
 	fmt.Println("  ④ 都不是 -> 看 /memory/classes/total:bytes 减去 heap，可能是栈/元数据/cgo")
 	fmt.Println("常见的真泄漏源：goroutine 泄漏（连带它的栈和闭包）、全局 map 只增不删、")
-	fmt.Println("  大 slice 截小后仍持有底层数组（slice.md 3.3）、time.Ticker 忘了 Stop")
+	fmt.Println("  大 slice 截小后仍持有底层数组（slice.md 3.3）；ticker 消费 goroutine 缺少退出路径")
 }
 
 // ---------------------------------------------------------------------------

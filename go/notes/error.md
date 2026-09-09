@@ -1,5 +1,18 @@
 # error
 
+> 定位：错误分类、包装与 API 契约。
+> 前置知识：[函数](func.md)、[接口](interface.md)。
+> 配套示例：[errs/main.go](errs/main.go)（`go run ./errs`）；命令均在 notes 根目录执行。
+
+**阅读路线**：先读 [基础使用](#topic-1) → [工程实践与常见陷阱](#topic-3)；深入实现或进阶用法时读 [原理](#topic-2)。
+
+**篇内导航**
+
+- [基础使用](#topic-1)
+- [原理](#topic-2)
+- [工程实践与常见陷阱](#topic-3)
+- [常见面试题](#topic-4)
+
 > 环境：`go version go1.26.3`。源码：`errors/{errors,wrap,join}.go`、`fmt/errors.go`。配套代码：`notes/errs/`（目录名避开 `error` 这个类型名）。
 >
 > 版本演进：
@@ -8,7 +21,11 @@
 > - **1.21**：`errors.ErrUnsupported`（通用"不支持此操作"哨兵）。
 > - **1.26**：**`errors.AsType[E error](err error) (E, bool)`** —— 泛型版 `As`，把运行时 panic 变成编译期检查。
 
+<a id="topic-1"></a>
+
 ## 一、基础使用
+
+<a id="section-1-1"></a>
 
 ### 1.1 error 只是一个接口
 
@@ -30,6 +47,8 @@ errors.New("x") == errors.New("x")   // false！两次 New 是两个不同的指
 
 `fmt.Errorf` 不带 `%w` 时等价于 `errors.New(格式化结果)`（返回 `*errors.errorString`），`errors.Unwrap` 拿到 `nil`。
 
+<a id="section-1-2"></a>
+
 ### 1.2 三种错误表达方式
 
 | 方式 | 适用场景 | 调用方怎么判断 |
@@ -40,7 +59,9 @@ errors.New("x") == errors.New("x")   // false！两次 New 是两个不同的指
 
 标准库的哨兵：`io.EOF`、`io.ErrUnexpectedEOF`、`sql.ErrNoRows`、`fs.ErrNotExist`、`fs.ErrExist`、`context.Canceled`、`context.DeadlineExceeded`、`errors.ErrUnsupported`。
 
-**默认选不透明错误**。哨兵和自定义类型都是**公开 API 承诺**，导出之后就不能改（见 3.8）。
+**默认选不透明错误**。哨兵和自定义类型都是**公开 API 承诺**，导出之后就不能改（见 [哨兵与包装都是 API 契约](#section-3-8)）。
+
+<a id="section-1-3"></a>
 
 ### 1.3 包装：`%w`
 
@@ -62,7 +83,9 @@ Unwrap 链:
 Is(io.ErrUnexpectedEOF) = true
 ```
 
-**`%w` 和 `%v` 唯一的区别**：`%w` 保留了可编程的关系（`Is`/`As` 能穿透），`%v` 只留下字符串。选哪个是个 API 设计决策，不是风格问题（见 3.4）。
+**`%w` 和 `%v` 唯一的区别**：`%w` 保留了可编程的关系（`Is`/`As` 能穿透），`%v` 只留下字符串。选哪个是个 API 设计决策，不是风格问题（见 [包装还是不包装](#section-3-4)）。
+
+<a id="section-1-4"></a>
 
 ### 1.4 Is 与 As
 
@@ -85,6 +108,8 @@ As(*fs.PathError):  Op=open Path=/definitely/not/exist Err=no such file or direc
 
 **`os.IsNotExist`/`os.IsPermission`/`os.IsTimeout` 这类老函数不穿透包装**，1.13 之后一律改用 `errors.Is`。
 
+<a id="section-1-5"></a>
+
 ### 1.5 `errors.AsType`（1.26 新增）
 
 ```go
@@ -99,6 +124,8 @@ if pe, ok := errors.AsType[*fs.PathError](err); ok { use(pe.Path) }
 签名：`func AsType[E error](err error) (E, bool)`。
 
 价值不只是短：`errors.As` 的第二个参数是 `any`，传错了**只能在运行时 panic**（`errors: target must be a non-nil pointer`）；`AsType` 把这件事挪到了编译期。新代码优先用它。
+
+<a id="section-1-6"></a>
 
 ### 1.6 `errors.Join`（1.20+）
 
@@ -116,7 +143,9 @@ func validate(age int, name string) error {
 - `Is`/`As` 能正常穿透（深度优先，找到第一个匹配）；
 - `Join(nil, nil)` → `nil`，所以可以无脑 `errors.Join(errs...)`。
 
-典型场景：表单批量校验、批量任务汇总、多个 `defer Close()` 的错误合并（见 3.7）。
+典型场景：表单批量校验、批量任务汇总、多个 `defer Close()` 的错误合并（见 [`defer` 里的错误被吞掉](#section-3-7)）。
+
+<a id="section-1-7"></a>
 
 ### 1.7 一个 `Errorf` 里多个 `%w`（1.20+）
 
@@ -129,7 +158,11 @@ errors.Is(err, ErrPermission)  // true
 
 `fmt/errors.go` 里按 `%w` 的个数分三条路：0 个 → `errors.New`；1 个 → `*wrapError`（`Unwrap() error`）；多个 → `*wrapErrors`（`Unwrap() []error`）。
 
+<a id="topic-2"></a>
+
 ## 二、原理
+
+<a id="section-2-1"></a>
 
 ### 2.1 Unwrap 是一棵树，不是一条链
 
@@ -155,6 +188,8 @@ if u, ok := err.(interface{ Unwrap() []error }); ok {
 }
 ```
 
+<a id="section-2-2"></a>
+
 ### 2.2 自定义 `Is` / `As` 方法
 
 ```go
@@ -175,7 +210,9 @@ code=500 Is(ErrServerSide)=true
 code=503 Is(ErrServerSide)=true
 ```
 
-`Is` 方法用来表达"**一类**错误"；`As(target any) bool` 方法用来自己控制类型转换（复合错误如 `net.OpError` 常用）。这是把"内部错误映射成对外错误分类"的标准手法（见 3.8）。
+`Is` 方法用来表达"**一类**错误"；`As(target any) bool` 方法用来自己控制类型转换（复合错误如 `net.OpError` 常用）。这是把"内部错误映射成对外错误分类"的标准手法（见 [哨兵与包装都是 API 契约](#section-3-8)）。
+
+<a id="section-2-3"></a>
 
 ### 2.3 `fmt.wrapError` 长什么样
 
@@ -193,6 +230,8 @@ func (e *wrapError) Unwrap() error { return e.err }
 - 打印一次错误 = 打印一个已拼好的字符串，`Error()` 不递归；
 - 但**内存上**每层 wrap 都持有一份包含下层全文的字符串，深层嵌套会造成 O(n²) 的字符串占用。日志系统里对同一个错误反复 `fmt.Errorf` 包装是有实际成本的。
 
+<a id="section-2-4"></a>
+
 ### 2.4 没有栈追踪，怎么办
 
 标准库的错误**不带 stack trace**（设计取舍：错误应该是廉价的值）。三条现实路径：
@@ -203,7 +242,11 @@ func (e *wrapError) Unwrap() error { return e.err }
 
 Go 官方多次讨论过在标准库加栈追踪（`errors.StackTrace` 提案），至今未进。
 
-## 三、常见陷阱
+<a id="topic-3"></a>
+
+## 三、工程实践与常见陷阱
+
+<a id="section-3-1"></a>
 
 ### 3.1 nil 接口陷阱（最经典的一道题）
 
@@ -225,9 +268,11 @@ err = badReturn(false)  -> err == nil ? false （类型 *main.MyErr）
 err = goodReturn(false) -> err == nil ? true
 ```
 
-原因：接口值是 `(type, data)` 两个字，这里 `type=*main.MyErr`、`data=nil`，**只有两者都为 nil 接口才等于 nil**（见 interface.md 2.1）。
+原因：接口值是 `(type, data)` 两个字，这里 `type=*main.MyErr`、`data=nil`，**只有两者都为 nil 接口才等于 nil**（见 [接口值的两种运行时表示：`eface` 与 `iface`](interface.md#section-2-1)）。
 
 **铁律：函数返回错误一律声明为 `error`，绝不返回具体的错误指针类型**。同理，中间变量也要用 `error` 类型接。`go vet` 的 nilness 分析和 staticcheck SA4023 能抓到一部分。
+
+<a id="section-3-2"></a>
 
 ### 3.2 用 `==` 比较错误
 
@@ -240,6 +285,8 @@ errors.Is(wrapped, os.ErrNotExist)     // true
 - 唯一还能用 `==` 的：`io.EOF`（约定俗成，标准库承诺不包装它）——即便如此也建议写 `errors.Is`。
 - **最糟的写法是比较错误字符串** `err.Error() == "not found"`：文案随时会改，还可能被上层包装。
 
+<a id="section-3-3"></a>
+
 ### 3.3 `errors.As` 的参数陷阱
 
 ```go
@@ -249,6 +296,8 @@ errors.As(err, &ve)   // ✓
 ```
 
 `go vet` 能静态抓到大部分（*second argument to errors.As must be a non-nil pointer...*），但通过接口/函数值间接调用时抓不到。**1.26 起用 `errors.AsType` 彻底避开这个坑**。
+
+<a id="section-3-4"></a>
 
 ### 3.4 包装还是不包装
 
@@ -263,6 +312,8 @@ errors.As(err, &ve)   // ✓
 - **每层都包一次**，日志里出现十层重复前缀：`"handler: service: repo: dao: query: ..."`。只在**跨越有意义的边界**时加上下文。
 - **重复动词**：`"failed to open file: failed to open: no such file or directory"`。加的信息应该是"这一层特有的"（哪个文件、哪个用户、哪个请求 ID）。
 
+<a id="section-3-5"></a>
+
 ### 3.5 错误文案规范
 
 ```go
@@ -271,6 +322,8 @@ errors.New("User not found.")     // ✗
 ```
 
 原因：错误常被嵌进更长的句子（`"read config: user: not found"`）。例外是以专有名词/缩写开头（`"HTTP request failed"`、`"TLS handshake timeout"`）。对应 lint 规则 `ST1005`。
+
+<a id="section-3-6"></a>
 
 ### 3.6 panic 还是 error
 
@@ -282,7 +335,7 @@ errors.New("User not found.")     // ✗
 | | 违反不变量（内部状态自相矛盾） |
 
 - **库的边界要 recover**：HTTP handler、goroutine 入口、插件调用点——一个 goroutine 里的 panic 会带走整个进程。
-- `recover` 只在**直接 defer 的函数**里有效（见 func.md 3.4）。
+- `recover` 只在**直接 defer 的函数**里有效（见 [recover 只在直接的 defer 函数中有效](func.md#section-3-4)）。
 - **别用 panic/recover 做控制流**。可以在包内部用 panic 简化深递归的错误传递（`encoding/json` 就这么干），但必须在**包的导出边界**转成 error：
 
 ```go
@@ -297,7 +350,9 @@ func safeDivide(a, b int) (result int, err error) {
 // safeDivide(1, 0) -> safeDivide: recovered: runtime error: integer divide by zero
 ```
 
-注意有些错误 **recover 不了**：`fatal error: concurrent map writes`、`unlock of unlocked mutex`、`stack overflow`、OOM（见 sync.md 3.2、mem.md 3.3）。
+注意有些错误 **recover 不了**：`fatal error: concurrent map writes`、`unlock of unlocked mutex`、`stack overflow`、OOM（见 [`fatal error` 不是 `panic`](sync.md#section-3-2)、[栈溢出](mem.md#section-3-3)）。
+
+<a id="section-3-7"></a>
 
 ### 3.7 `defer` 里的错误被吞掉
 
@@ -325,6 +380,8 @@ func writeGood(name string, data []byte) (err error) {
 
 用 `errcheck`（或 golangci-lint 的 errcheck）扫被忽略的错误。
 
+<a id="section-3-8"></a>
+
 ### 3.8 哨兵与包装都是 API 契约
 
 ```go
@@ -340,9 +397,13 @@ return fmt.Errorf("query user: %w", pqErr)
 2. 内部错误用 `%v` 转成文字（保留可读性，切断可编程依赖）；
 3. 需要分类时定义自己的层级（`ErrTimeout`/`ErrConflict`/`ErrInvalidInput`），用**自定义 `Is` 方法**把底层错误映射上去。
 
+<a id="section-3-9"></a>
+
 ### 3.9 `errors.Is(err, err)` 与自引用
 
 `errors.Is` 第一步就是 `err == target`，所以 `Is(err, err)` 恒为 true（哪怕 err 是 Join 出来的）。这在写"错误分类表"时容易造成误判——写循环遍历 target 列表时注意别把 `err` 自己混进去。
+
+<a id="section-3-10"></a>
 
 ### 3.10 忘了 `%w` 的动词写成了 `%s`
 
@@ -351,6 +412,8 @@ fmt.Errorf("read: %s", err)   // 编译通过、打印正常，但 Is/As 全部�
 ```
 
 没有编译错误、没有 vet 警告（`%s` 对 error 是合法的），只有在"为什么我的 `errors.Is` 不生效"时才会发现。**统一约定：包装错误只用 `%w` 或 `%v`，不用 `%s`**，这样 grep 就能审计。
+
+<a id="section-3-11"></a>
 
 ### 3.11 在循环里累积 error 却只留最后一个
 
@@ -374,6 +437,8 @@ for _, item := range items {
 return errors.Join(errs...)
 ```
 
+<a id="section-3-12"></a>
+
 ### 3.12 `context` 错误的判断
 
 ```go
@@ -383,49 +448,51 @@ if errors.Is(err, context.Canceled)         { /* 主动取消 */ }
 
 注意：`net/http`、`database/sql` 等会把 context 错误包装在自己的错误里，**必须用 `Is` 而不是 `==`**。另外 `context.Cause(ctx)`（1.20+）能拿到 `WithCancelCause` 传入的原因（见 context.md）。
 
+<a id="topic-4"></a>
+
 ## 四、常见面试题
 
 **1. Go 的错误处理为什么是返回值而不是异常？**
 显式优于隐式：每个调用点都能看到失败的可能性和处理方式，控制流不会被非局部跳转打断。代价是啰嗦（`if err != nil` 满屏）。Go 团队多次讨论过 `try`/`check` 语法糖（2019 年的 `try` 提案），全部否决，理由是"错误处理应该显式、可读，语法糖会掩盖控制流"。
 
 **2. `errors.New("x") == errors.New("x")` 是 true 还是 false？为什么？**
-false。`errors.New` 返回 `*errorString` 指针，两次调用是两个不同对象。这正是设计意图：错误的身份由变量（哨兵）决定，而不是文本（见 1.1）。
+false。`errors.New` 返回 `*errorString` 指针，两次调用是两个不同对象。这正是设计意图：错误的身份由变量（哨兵）决定，而不是文本（见 [error 只是一个接口](#section-1-1)）。
 
 **3. `%w` 和 `%v` 的区别？**
-`%w` 生成 `*fmt.wrapError`（实现 `Unwrap() error`），保留可编程关系，`Is`/`As` 能穿透；`%v` 只把子错误格式化成字符串，关系断掉。选哪个是 API 设计决策：`%w` 意味着你把底层错误当成了对外承诺（见 1.3、3.4、3.8）。
+`%w` 生成 `*fmt.wrapError`（实现 `Unwrap() error`），保留可编程关系，`Is`/`As` 能穿透；`%v` 只把子错误格式化成字符串，关系断掉。选哪个是 API 设计决策：`%w` 意味着你把底层错误当成了对外承诺（见 [包装：`%w`](#section-1-3)、[包装还是不包装](#section-3-4)、[哨兵与包装都是 API 契约](#section-3-8)）。
 
 **4. `errors.Is` 和 `errors.As` 的区别？各自怎么判断？**
-`Is` 找**值**：`err == target`，或 `err` 的 `Is(error) bool` 方法返回 true，然后递归 Unwrap。`As` 找**类型**：`err` 可赋值给 target 指向的类型，或 `err` 的 `As(any) bool` 返回 true。遍历都是先序深度优先（见 1.4、2.1）。
+`Is` 找**值**：`err == target`，或 `err` 的 `Is(error) bool` 方法返回 true，然后递归 Unwrap。`As` 找**类型**：`err` 可赋值给 target 指向的类型，或 `err` 的 `As(any) bool` 返回 true。遍历都是先序深度优先（见 [Is 与 As](#section-1-4)、[Unwrap 是一棵树，不是一条链](#section-2-1)）。
 
 **5. `errors.AsType` 相比 `errors.As` 好在哪？（1.26 新增）**
-签名 `AsType[E error](err error) (E, bool)`：不需要预声明变量、不需要取地址、**参数类型错误在编译期就报**。`errors.As` 的第二个参数是 `any`，传错只能运行时 panic（见 1.5、3.3）。
+签名 `AsType[E error](err error) (E, bool)`：不需要预声明变量、不需要取地址、**参数类型错误在编译期就报**。`errors.As` 的第二个参数是 `any`，传错只能运行时 panic（见 [`errors.AsType`（1.26 新增）](#section-1-5)、[`errors.As` 的参数陷阱](#section-3-3)）。
 
 **6. `errors.Join` 的错误怎么遍历？`errors.Unwrap` 能拿到吗？**
-`Join` 返回的类型只实现 `Unwrap() []error`，`errors.Unwrap()` 函数（只认 `Unwrap() error`）对它返回 nil。要遍历得断言 `interface{ Unwrap() []error }`。`Is`/`As` 是能正常穿透的（见 1.6、2.1）。
+`Join` 返回的类型只实现 `Unwrap() []error`，`errors.Unwrap()` 函数（只认 `Unwrap() error`）对它返回 nil。要遍历得断言 `interface{ Unwrap() []error }`。`Is`/`As` 是能正常穿透的（见 [`errors.Join`（1.20+）](#section-1-6)、[Unwrap 是一棵树，不是一条链](#section-2-1)）。
 
 **7. 为什么 `err != nil` 但 `err` 打印出来是 `<nil>`？**
-典型的 nil 接口陷阱：函数返回了具体的错误指针类型（值为 nil），装进 `error` 接口后 type 字段非 nil，所以 `err != nil`，但 `%v` 打印 data 得到 `<nil>`。修法：返回类型一律写 `error`（见 3.1）。
+典型的 nil 接口陷阱：函数返回了具体的错误指针类型（值为 nil），装进 `error` 接口后 type 字段非 nil，所以 `err != nil`，但 `%v` 打印 data 得到 `<nil>`。修法：返回类型一律写 `error`（见 [nil 接口陷阱（最经典的一道题）](#section-3-1)）。
 
 **8. `os.IsNotExist(err)` 和 `errors.Is(err, fs.ErrNotExist)` 有什么区别？**
-前者是 1.13 之前的 API，**不会穿透 `%w` 包装**，只检查最外层。后者遍历整棵错误树。所有 `os.IsXxx` 系列都应该换成 `errors.Is`（见 1.4）。
+前者是 1.13 之前的 API，**不会穿透 `%w` 包装**，只检查最外层。后者遍历整棵错误树。所有 `os.IsXxx` 系列都应该换成 `errors.Is`（见 [Is 与 As](#section-1-4)）。
 
 **9. 什么时候用哨兵错误，什么时候用自定义错误类型？**
-只需要区分种类 → 哨兵 + `Is`；调用方需要结构化信息（字段名、状态码、重试建议）→ 自定义类型 + `As`。都不需要 → 不透明错误（只返回 error）。默认选最后一种，因为前两种都是不可撤回的 API 承诺（见 1.2、3.8）。
+只需要区分种类 → 哨兵 + `Is`；调用方需要结构化信息（字段名、状态码、重试建议）→ 自定义类型 + `As`。都不需要 → 不透明错误（只返回 error）。默认选最后一种，因为前两种都是不可撤回的 API 承诺（见 [三种错误表达方式](#section-1-2)、[哨兵与包装都是 API 契约](#section-3-8)）。
 
 **10. Go 的 error 为什么没有栈追踪？怎么补？**
-设计取舍：error 是**廉价的值**，抓栈要付分配和遍历的代价，而且大多数错误只需要"哪一步失败了"而非完整栈。补法：靠 wrap 文本形成人造调用链（`"pkg: op: detail"`）、用第三方库抓栈、或在日志层加 `AddSource`（见 2.4）。
+设计取舍：error 是**廉价的值**，抓栈要付分配和遍历的代价，而且大多数错误只需要"哪一步失败了"而非完整栈。补法：靠 wrap 文本形成人造调用链（`"pkg: op: detail"`）、用第三方库抓栈、或在日志层加 `AddSource`（见 [没有栈追踪，怎么办](#section-2-4)）。
 
 **11. panic/recover 和 error 的边界在哪？**
-可预期失败用 error；程序员 bug、不变量被破坏、初始化致命错误用 panic。库内部可以用 panic 简化深递归（`encoding/json` 就是），但必须在导出边界 recover 成 error。goroutine 入口、HTTP handler 一定要有 recover。注意 `fatal error`（并发写 map、解锁未加锁的 mutex、栈溢出）**recover 不了**（见 3.6）。
+可预期失败用 error；程序员 bug、不变量被破坏、初始化致命错误用 panic。库内部可以用 panic 简化深递归（`encoding/json` 就是），但必须在导出边界 recover 成 error。goroutine 入口、HTTP handler 一定要有 recover。注意 `fatal error`（并发写 map、解锁未加锁的 mutex、栈溢出）**recover 不了**（见 [panic 还是 error](#section-3-6)）。
 
 **12. `defer f.Close()` 有什么问题？**
-错误被丢掉。读文件无所谓，**写文件可能意味着数据没落盘**。正确写法是命名返回值 + `defer func(){ err = errors.Join(err, f.Close()) }()`（见 3.7）。
+错误被丢掉。读文件无所谓，**写文件可能意味着数据没落盘**。正确写法是命名返回值 + `defer func(){ err = errors.Join(err, f.Close()) }()`（见 [`defer` 里的错误被吞掉](#section-3-7)）。
 
 **13. 为什么不建议对第三方错误用 `%w`？**
-一旦包装，调用方就能 `errors.Is(err, thirdparty.ErrXxx)`，你的实现细节变成了 API 契约，之后换库就是破坏性变更。对外包装用 `%v`，需要分类时映射到自己定义的错误上（见 3.8）。
+一旦包装，调用方就能 `errors.Is(err, thirdparty.ErrXxx)`，你的实现细节变成了 API 契约，之后换库就是破坏性变更。对外包装用 `%v`，需要分类时映射到自己定义的错误上（见 [哨兵与包装都是 API 契约](#section-3-8)）。
 
 **14. 错误信息应该怎么写？**
-小写开头、不带标点、带 `包名: 操作:` 前缀，让多层包装自然拼成一条可读的链。原因是错误常被嵌进更长的句子。对应 lint 规则 ST1005（见 3.5）。
+小写开头、不带标点、带 `包名: 操作:` 前缀，让多层包装自然拼成一条可读的链。原因是错误常被嵌进更长的句子。对应 lint 规则 ST1005（见 [错误文案规范](#section-3-5)）。
 
 **15. 一个 `fmt.Errorf` 里能有多个 `%w` 吗？**
-1.20 起可以。多个 `%w` 会生成 `*fmt.wrapErrors`（实现 `Unwrap() []error`），`Is`/`As` 对每个都能匹配（见 1.7）。
+1.20 起可以。多个 `%w` 会生成 `*fmt.wrapErrors`（实现 `Unwrap() []error`），`Is`/`As` 对每个都能匹配（见 [一个 `Errorf` 里多个 `%w`（1.20+）](#section-1-7)）。
