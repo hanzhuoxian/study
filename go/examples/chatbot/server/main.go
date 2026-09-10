@@ -9,6 +9,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	writeWait = 10 * time.Second
+	// 连接建立或收到 Pong 后，最多等待 60 秒。
+	pongWait = 3 * time.Second
+	// Ping 间隔必须小于 pongWait，给客户端留出回复时间。
+	pingPeriod = 1 * time.Second
+)
+
 type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
@@ -29,6 +37,7 @@ func (h *Hub) run() {
 			h.clients[client] = struct{}{}
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
+				fmt.Printf("Client %p discontected\n", client)
 				delete(h.clients, client)
 				close(client.send)
 			}
@@ -53,6 +62,14 @@ func (c *Client) readPump() {
 		c.hub.unregister <- c
 	}()
 
+	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+		return
+	}
+	// ReadMessage 会处理 Pong 控制帧，并调用此回调续期读超时。
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -65,22 +82,32 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) writePump() {
-	defer c.conn.Close()
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
 
 	for {
-		message, ok := <-c.send
-		if !ok {
-			return
-		}
-		if err := c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-			return
-		}
-		err := c.conn.WriteMessage(
-			websocket.TextMessage,
-			message,
-		)
-		if err != nil {
-			return
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				return
+			}
+			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+				return
+			}
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
+		case <-ticker.C:
+			// Ping 和聊天消息由同一个 goroutine 写入，避免并发写连接。
+			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+				return
+			}
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
