@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -12,22 +15,37 @@ import (
 const (
 	writeWait = 10 * time.Second
 	// 连接建立或收到 Pong 后，最多等待 60 秒。
-	pongWait = 3 * time.Second
+	pongWait = 60 * time.Second
 	// Ping 间隔必须小于 pongWait，给客户端留出回复时间。
-	pingPeriod = 1 * time.Second
+	pingPeriod = 30 * time.Second
 )
 
+// ChatRequest 是客户端发送的消息，发送者和时间由服务端补充。
+type ChatRequest struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
+}
+
+// Message 是服务端广播的消息。当前只支持 type="chat"。
+type Message struct {
+	Type      string    `json:"type"`
+	Sender    string    `json:"sender"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 type Client struct {
+	ID   string
 	hub  *Hub
 	conn *websocket.Conn
-	send chan []byte
+	send chan Message
 }
 
 type Hub struct {
 	clients    map[*Client]struct{}
 	register   chan *Client
 	unregister chan *Client
-	broadcast  chan []byte
+	broadcast  chan Message
 }
 
 func (h *Hub) run() {
@@ -67,17 +85,35 @@ func (c *Client) readPump() {
 	}
 	// ReadMessage 会处理 Pong 控制帧，并调用此回调续期读超时。
 	c.conn.SetPongHandler(func(string) error {
+		fmt.Printf("Client %p -> Pong\n", c)
 		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
 	for {
-		_, message, err := c.conn.ReadMessage()
+		messageType, data, err := c.conn.ReadMessage()
 		if err != nil {
 			break
 		}
 
-		message = []byte(fmt.Sprintf("Client %p : %s\n", c, string(message)))
-		c.hub.broadcast <- message
+		if messageType != websocket.TextMessage {
+			continue
+		}
+		var request ChatRequest
+		if err := json.Unmarshal(data, &request); err != nil {
+			log.Printf("Client %s 消息不是有效 JSON: %v", c.ID, err)
+			continue
+		}
+		if request.Type != "chat" || strings.TrimSpace(request.Content) == "" {
+			log.Printf("Client %s 消息无效: type 必须为 chat，content 不能为空", c.ID)
+			continue
+		}
+
+		c.hub.broadcast <- Message{
+			Type:      "chat",
+			Sender:    c.ID,
+			Content:   fmt.Sprintf("server say: %s", request.Content),
+			Timestamp: time.Now().UTC(),
+		}
 	}
 }
 
@@ -97,10 +133,11 @@ func (c *Client) writePump() {
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
 				return
 			}
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if err := c.conn.WriteJSON(message); err != nil {
 				return
 			}
 		case <-ticker.C:
+			fmt.Printf("ping -> Client %p\n", c)
 			// Ping 和聊天消息由同一个 goroutine 写入，避免并发写连接。
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
 				return
@@ -126,7 +163,7 @@ func main() {
 		clients:    make(map[*Client]struct{}),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		broadcast:  make(chan []byte, 256),
+		broadcast:  make(chan Message, 256),
 	}
 
 	go hub.run()
@@ -149,9 +186,11 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
+		// 每条连接分配一个 ID；它不代表已认证的用户身份。
+		ID:   rand.Text(),
 		hub:  hub,
 		conn: conn,
-		send: make(chan []byte, 256),
+		send: make(chan Message, 256),
 	}
 
 	hub.register <- client
