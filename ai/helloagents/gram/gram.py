@@ -4,6 +4,7 @@ import collections
 corpus = "datawhale agent learns datawhale agent works"
 tokens = corpus.split()
 total_tokens = len(tokens)
+print(f"语料库: {corpus} \n总词数: {total_tokens}\ntokens: {tokens}\n")
 
 # --- 第一步:计算 P(datawhale) ---
 count_datawhale = tokens.count('datawhale')
@@ -12,8 +13,10 @@ print(f"第一步: P(datawhale) = {count_datawhale}/{total_tokens} = {p_datawhal
 
 # --- 第二步:计算 P(agent|datawhale) ---
 # 先计算 bigrams 用于后续步骤
-bigrams = zip(tokens, tokens[1:])
+bigrams = list(zip(tokens, tokens[1:]))
+print(f"bigrams: {list(bigrams)}")  # 打印 bigrams 列表
 bigram_counts = collections.Counter(bigrams)
+print(f"bigram_counts: {dict(bigram_counts)}")  # 打印 bigram_counts 字典
 count_datawhale_agent = bigram_counts[('datawhale', 'agent')]
 # count_datawhale 已在第一步计算
 p_agent_given_datawhale = count_datawhale_agent / count_datawhale
