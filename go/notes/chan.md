@@ -561,12 +561,12 @@ channel 阻塞用的是 `gopark` / `goready`，不是操作系统级阻塞：
 
 **第一步：编译器先做降级**（`cmd/compile/internal/walk/select.go:33`），大部分 select 根本不会进 `selectgo`：
 
-| case 数量           | 降级为                                                                          |
-| ------------------- | ------------------------------------------------------------------------------- |
-| `select {}`（0 个） | `block()` —— 直接永久 gopark（`select.go:103`）                                 |
-| 1 个（无 default）  | 直接的 `chansend` / `chanrecv`，退化成普通收发                                  |
-| 1 个 + default      | `selectnbsend` / `selectnbrecv`，即 `block=false` 的收发（`chan.go:784`/`804`） |
-| ≥2 个               | 走通用的 `selectgo`                                                             |
+| case 数量          | 降级为                                                                      |
+| ---------------- | ------------------------------------------------------------------------ |
+| `select {}`（0 个） | `block()` —— 直接永久 gopark（`select.go:103`）                                |
+| 1 个（无 default）   | 直接的 `chansend` / `chanrecv`，退化成普通收发                                      |
+| 1 个 + default    | `selectnbsend` / `selectnbrecv`，即 `block=false` 的收发（`chan.go:784`/`804`） |
+| ≥2 个             | 走通用的 `selectgo`                                                          |
 
 所以"`select` + `default` 做非阻塞收发"这种写法的开销和普通收发几乎一样，没有 selectgo 的排序和入队成本。
 

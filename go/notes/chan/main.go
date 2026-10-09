@@ -123,6 +123,7 @@ func basicRange() {
 	for v := range ch {
 		fmt.Print(v, " ")
 	}
+
 	fmt.Println("<- close 后 range 自然退出")
 }
 
