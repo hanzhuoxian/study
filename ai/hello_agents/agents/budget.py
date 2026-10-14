@@ -46,8 +46,9 @@ class RunBudget:
         self.max_calls = max_calls
         self.max_tokens = max_tokens
         self.max_seconds = max_seconds
-        self.calls_made = 0
-        self.tokens_used = 0
+        self.calls = 0
+        self.tokens = 0
+        self.unknown_usage = 0
         # 单调时钟不受系统时间调整影响，锁保护计数的检查与更新。
         self._started = monotonic()
         self._lock = Lock()
@@ -119,8 +120,8 @@ def budget_call(Default=None):
 
     当前作用域的预算优先于默认预算；两者都为空时不执行预算检查。
     返回 (receipt, budget)，调用方将统计写入 receipt['usage']。
-    正常退出时检查耗时；退出时是否记录用量取决于默认预算是否存在，
-    记录到实际选中的预算。调用失败时也会记录，未填写的用量会记为未知。
+    正常退出时检查耗时；只要选中了预算，退出时就将用量记录到该预算。
+    调用失败时也会记录，未填写的用量会记为未知。
     """
     budget = _current.get() or Default
     receipt = {}
@@ -132,7 +133,7 @@ def budget_call(Default=None):
         if budget is not None:
             budget.check_time()
     finally:
-        if Default is not None:
+        if budget is not None:
             budget.record(receipt.get('usage', {}))
 
 def budgeted(method):
@@ -189,3 +190,4 @@ def budgeted_astream(method):
             finally:
                 await source.aclose()
     return call
+    
