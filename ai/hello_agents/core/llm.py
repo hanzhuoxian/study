@@ -1,9 +1,11 @@
+from copy import deepcopy
 import os
 import math
 
 from typing import Optional
 
 from .budget import RunBudget, budgeted
+from .exceptions import HelloAgentsException, LLMException
 
 
 class HelloAgentsLLM:
@@ -45,6 +47,17 @@ class HelloAgentsLLM:
             raise ValueError(
                 "messages/tools/stream/model/tool_choice belong to call methods"
             )
+        self.kwargs = deepcopy(kwargs)
+
+        # 验证参数
+        if self.model is None:
+            raise HelloAgentsException("model is required")
+        if self.api_key is None:
+            raise HelloAgentsException("api_key is required")
+        if self.base_url is None:
+            raise HelloAgentsException("base_url is required")
+
+        self.last_call_stats = None
 
     def greet(self, name: str) -> str:
         return f"Hello, {name}! Welcome to the Agents LLM."
