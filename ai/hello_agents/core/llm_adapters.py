@@ -7,6 +7,7 @@ import queue as thread_queue
 from urllib.parse import urlparse
 from typing import Any, Dict, Iterable, List, Optional
 
+from core.exceptions import HelloAgentsException
 from core.llm_response import LLMResponse, LLMToolResponse
 
 
@@ -202,8 +203,23 @@ class OpenAIAdapter(BaseLLMAdapter):
             usage = {}
             if hasattr(response, "usage") and response.usage:
                 usage = _openai_usage(response.usage)
+            return LLMResponse(
+                finish_reason=getattr(response.choices[0], "finish_reason", None),
+                content=content,
+                model=self.model,
+                usage=usage,
+                latency_ms=latency_ms,
+                reasoning_content=reasoning_content,
+            )
         except Exception as e:
-            raise e
+            raise HelloAgentsException(f"OpenAI API调用失败: {str(e)}")
+
+    def stream_invoke(self, messages: List[Dict], prompt, **kwargs) -> Iterable[str]:
+        """流式调用"""
+        self._get_client()
+        start_time = time.time()
+
+        return super().stream_invoke(prompt, **kwargs)
 
 
 class AnthropicAdapter(BaseLLMAdapter):
