@@ -3,12 +3,13 @@ import asyncio
 import time
 import threading
 import queue as thread_queue
+import json
 
 from urllib.parse import urlparse
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 from core.exceptions import HelloAgentsException
-from core.llm_response import LLMResponse, LLMToolResponse
+from core.llm_response import LLMResponse, LLMToolResponse, StreamStats, ToolCall
 
 
 def _openai_usage(value) -> Dict[str, Any]:
@@ -172,7 +173,7 @@ class BaseLLMAdapter(ABC):
 
 class OpenAIAdapter(BaseLLMAdapter):
     def create_client(self) -> Any:
-        from openai import OpenAI
+        from llm import OpenAI
 
         return OpenAI(
             api_key=self.api_key, base_url=self.base_url, timeout=self.timeout
@@ -180,7 +181,7 @@ class OpenAIAdapter(BaseLLMAdapter):
 
     def create_async_client(self) -> Any:
         """创建OpenAI异步客户端"""
-        from openai import AsyncOpenAI
+        from llm import AsyncOpenAI
 
         return AsyncOpenAI(
             api_key=self.api_key, base_url=self.base_url, timeout=self.timeout
@@ -218,12 +219,286 @@ class OpenAIAdapter(BaseLLMAdapter):
         """流式调用"""
         self._get_client()
         start_time = time.time()
+        response = None
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+                **kwargs
+            )
+            collected_content = []
+            reasoning_content = None
+            finish_reason = None
+            usage = {}
 
-        return super().stream_invoke(prompt, **kwargs)
+            for chunk in response:
+                choices = getattr(chunk, "choices", None)
+                if choices:
+                    finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
+                    delta = getattr(choices[0], "delta", None)
+                    if delta is not None:
+                        # 提取内容
+                        content = getattr(delta, "content", None)
+                        if content:
+                            collected_content.append(content)
+                            yield content
+
+                        # Thinking model的推理过程
+                        reasoning_delta = getattr(delta, "reasoning_content", None)
+                        if reasoning_delta:
+                            if reasoning_content is None:
+                                reasoning_content = ""
+                            reasoning_content += reasoning_delta
+
+                # 提取usage（流式最后一个chunk可能包含）
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = _openai_usage(chunk.usage)
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            # 返回统计信息（存储到适配器，供外部获取）
+            self.last_stats = StreamStats(
+                model=self.model,
+                usage=usage,
+                latency_ms=latency_ms,
+                reasoning_content=reasoning_content,
+                finish_reason=finish_reason
+            )
+
+        except Exception as e:
+            raise HelloAgentsException(f"OpenAI API流式调用失败: {str(e)}")
+        finally:
+            close = getattr(response, "close", None)
+            if close:
+                close()
+
+    async def astream_invoke(self, messages: List[Dict], **kwargs) -> AsyncIterator[str]:
+        """真正的异步流式调用（使用 OpenAI 原生异步客户端）"""
+        if not self._async_client:
+            self._async_client = self.create_async_client()
+
+        start_time = time.time()
+
+        response = None
+        try:
+            response = await self._async_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+                **kwargs
+            )
+
+            collected_content = []
+            reasoning_content = None
+            finish_reason = None
+            usage = {}
+
+            async for chunk in response:
+                choices = getattr(chunk, "choices", None)
+                if choices:
+                    finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
+                    delta = getattr(choices[0], "delta", None)
+                    if delta is not None:
+                        # 提取内容
+                        content = getattr(delta, "content", None)
+                        if content:
+                            collected_content.append(content)
+                            yield content
+
+                        # Thinking model的推理过程
+                        reasoning_delta = getattr(delta, "reasoning_content", None)
+                        if reasoning_delta:
+                            if reasoning_content is None:
+                                reasoning_content = ""
+                            reasoning_content += reasoning_delta
+
+                # 提取usage（流式最后一个chunk可能包含）
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = _openai_usage(chunk.usage)
+
+            latency_ms = int((time.time() - start_time) * 1000)
+
+            # 返回统计信息（存储到适配器，供外部获取）
+            self.last_stats = StreamStats(
+                model=self.model,
+                usage=usage,
+                latency_ms=latency_ms,
+                reasoning_content=reasoning_content,
+                finish_reason=finish_reason
+            )
+
+        except Exception as e:
+            raise HelloAgentsException(f"OpenAI API异步流式调用失败: {str(e)}")
+        finally:
+            close = getattr(response, "close", None)
+            if close:
+                await close()
+
+
+    def invoke_with_tools(self, messages: List[Dict], tools: List[Dict],
+                         tool_choice: Union[str, Dict] = "auto", **kwargs) -> LLMToolResponse:
+        """工具调用（Function Calling）"""
+        self._get_client()
+
+        start_time = time.time()
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                **kwargs
+            )
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            message = response.choices[0].message
+
+            tool_calls = []
+            if message.tool_calls:
+                for tc in message.tool_calls:
+                    tool_calls.append(ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=tc.function.arguments
+                    ))
+
+            usage = {}
+            if response.usage:
+                usage = _openai_usage(response.usage)
+
+            return LLMToolResponse(
+                finish_reason=getattr(response.choices[0], "finish_reason", None),
+                content=message.content,
+                reasoning_content=getattr(message, "reasoning_content", None),
+                tool_calls=tool_calls,
+                model=response.model,
+                usage=usage,
+                latency_ms=latency_ms
+            )
+
+        except Exception as e:
+            raise HelloAgentsException(f"OpenAI Function Calling调用失败: {str(e)}")
+
+
+    async def astream_invoke_with_tools(self, messages, tools, **kwargs):
+        """先产出可见文本的增量，最后产出一次组装完成的工具响应。"""
+        started = time.monotonic()
+        if tools:
+            kwargs["tools"] = tools
+        else:
+            kwargs.pop("tool_choice", None)
+        client = self.create_async_client()
+        stream = None
+        content, calls, usage, reason = [], {}, {}, None
+        reasoning = []
+        try:
+            stream = await client.chat.completions.create(
+                model=self.model, messages=messages, stream=True,
+                stream_options={"include_usage": True}, **kwargs)
+            async for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = _openai_usage(chunk.usage)
+                if not getattr(chunk, "choices", None):
+                    continue
+                choice = chunk.choices[0]
+                reason = getattr(choice, "finish_reason", None) or reason
+                delta = choice.delta
+                if getattr(delta, "reasoning_content", None):
+                    reasoning.append(delta.reasoning_content)
+                if getattr(delta, "content", None):
+                    content.append(delta.content)
+                    yield delta.content
+                for part in getattr(delta, "tool_calls", None) or []:
+                    item = calls.setdefault(part.index, {"id": "", "name": "", "arguments": ""})
+                    if part.id:
+                        item["id"] = part.id
+                    if part.function:
+                        item["name"] += part.function.name or ""
+                        item["arguments"] += part.function.arguments or ""
+        finally:
+            try:
+                if stream is not None:
+                    await stream.close()
+            finally:
+                await client.close()
+        yield LLMToolResponse(
+            content="".join(content), tool_calls=[ToolCall(**calls[i]) for i in sorted(calls)],
+            model=self.model, usage=usage, finish_reason=reason, reasoning_content="".join(reasoning) or None,
+            latency_ms=int((time.monotonic() - started) * 1000))
+
+
+
 
 
 class AnthropicAdapter(BaseLLMAdapter):
-    pass
+    """Anthropic 适配器"""
+    def create_client(self) -> Any:
+        try:
+            from anthropic import Anthropic
+            return Anthropic(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
+        except ImportError:
+            raise HelloAgentsException("anthropic 模块未安装")
+    def _convert_messages(self, messages: List[Dict]) -> tuple[Optional[str], List[Dict]]:
+        system_content = None
+        converted_messages = []
+        for message in messages:
+            if message["role"] == "system":
+                system_content = message["content"]
+            elif message["role"] == "assistant" and message.get("tool_calls"):
+                content_blocks = []
+                if message.get("content"):
+                    content_blocks.append({"type": "text", "text": message["content"]})
+                for tool_call in message.get("tool_calls", []):
+                    function = tool_call.get("function", {})
+                    arguments = function.get("arguments", {})
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments = {}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tool_call.get("id"),
+                        "name": function.get("name"),
+                        "input": arguments,
+                    })
+                converted_messages.append({
+                    "role": "assistant",
+                    "content": content_blocks,
+                })
+            elif message["role"] == "tool":
+                converted_messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": message.get("tool_call_id"),
+                        "content": message.get("content", ""),
+                    }],
+                })
+            else:
+                converted_messages.append(message)
+        
+        return system_content, converted_messages
+    def _convert_tools(self, tools: List[Dict]) -> List[Dict]:
+        converted_tools = []
+        for tool in tools:
+            if tool.get("type") == "function" and "function" in tool:
+                function = tool["function"]
+                converted_tools.append({
+                    "name": function["name"],
+                    "description": function.get("description", ""),
+                    "input_schema": function.get("parameters", {
+                        "type": "object",
+                        "properties": {},
+                    }),
+                })
+            else:
+                converted_tools.append(tool)
+
+        return converted_tools
+
+
+
 
 
 class GeminiAdapter(BaseLLMAdapter):

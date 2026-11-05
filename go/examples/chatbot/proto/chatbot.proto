@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package chatbot.v1;
+option go_package = "github.com/hanzhuoxian/study/go/examples/chatbot/proto;chatbotpb";
+
+service RoleplayModel {
+  // Generate streams model output as deltas. The gateway forwards each delta
+  // to the room through Redis Pub/Sub and WebSocket.
+  rpc Generate(GenerateRequest) returns (stream GenerateChunk);
+}
+
+message GenerateRequest {
+  string room_id = 1;
+  string user_id = 2;
+  string character_id = 3;
+  string content = 4;
+  repeated Turn history = 5;
+}
+message Turn { 
+  string role = 1; 
+  string content = 2;
+}
+
+message GenerateChunk {
+  string delta = 1;
+  bool done = 2;
+  string finish_reason = 3;
+}

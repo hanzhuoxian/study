@@ -1,9 +1,10 @@
 package main
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+	"github.com/hanzhuoxian/study/go/examples/gin/cms/bootstrap"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type User struct {
@@ -12,23 +13,18 @@ type User struct {
 }
 
 func main() {
+	config := zap.NewProductionConfig()
+	config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)     // 支持运行时动态调整级别
+	config.OutputPaths = []string{"stdout", "logs/app.log"} // 同时输出到控制台和文件
+	config.EncoderConfig.TimeKey = "timestamp"
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder // 人类易读的时间格式
 
-	router := gin.Default()
-	router.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "hello",
-		})
-	})
-	router.POST("/user/add", func(c *gin.Context) {
-		var user User
-		if err := c.ShouldBindJSON(&user); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"name": user.Name,
-			"age":  user.Age,
-		})
-	})
+	logger, err := config.Build()
+	if err != nil {
+		panic(err)
+	}
+	defer logger.Sync()
+	router := gin.New()
+	bootstrap.SetupRoute(router)
 	router.Run() // listens on 0.0.0.0:8080 by default
 }

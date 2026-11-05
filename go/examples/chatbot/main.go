@@ -1,147 +1,236 @@
+// Package main exposes the WebSocket gateway for the role-play chatbot.
+// A separate gRPC backend streams model tokens; Redis Pub/Sub distributes events
+// between gateway instances.
 package main
 
 import (
-	"crypto/rand"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
 )
 
 const (
-	writeWait = 10 * time.Second
-	// 连接建立或收到 Pong 后，最多等待 60 秒。
-	pongWait = 60 * time.Second
-	// Ping 间隔必须小于 pongWait，给客户端留出回复时间。
-	pingPeriod = 30 * time.Second
+	writeWait     = 10 * time.Second
+	pongWait      = 60 * time.Second
+	pingPeriod    = 30 * time.Second
+	roomQueueSize = 128
 )
 
-// ChatRequest 是客户端发送的消息，发送者和时间由服务端补充。
-type ChatRequest struct {
-	Type    string `json:"type"`
-	Content string `json:"content"`
+type ClientMessage struct {
+	Type        string `json:"type"` // chat | join
+	RoomID      string `json:"room_id,omitempty"`
+	CharacterID string `json:"character_id,omitempty"`
+	Content     string `json:"content,omitempty"`
 }
 
-// Message 是服务端广播的消息。当前只支持 type="chat"。
-type Message struct {
-	Type      string    `json:"type"`
-	Sender    string    `json:"sender"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
+type Event struct {
+	Type        string    `json:"type"` // token | done | error | chat
+	RoomID      string    `json:"room_id"`
+	CharacterID string    `json:"character_id,omitempty"`
+	Sender      string    `json:"sender,omitempty"`
+	Content     string    `json:"content,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+type ModelRequest struct{ RoomID, CharacterID, UserID, Content string }
+type ModelToken struct{ Content string }
+
+// ModelClient is implemented by the generated gRPC client adapter.
+type ModelClient interface {
+	Stream(context.Context, ModelRequest, func(ModelToken) error) error
+}
+
+type Publisher interface {
+	Publish(context.Context, string, Event) error
+}
+
+type RedisBus struct{ client *redis.Client }
+
+func NewRedisBus(addr, password string, db int) *RedisBus {
+	return &RedisBus{client: redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db})}
+}
+func (b *RedisBus) Publish(ctx context.Context, channel string, e Event) error {
+	data, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	return b.client.Publish(ctx, channel, data).Err()
+}
+func (b *RedisBus) Subscribe(ctx context.Context, channel string, handle func(Event)) error {
+	pubsub := b.client.Subscribe(ctx, channel)
+	defer pubsub.Close()
+	if _, err := pubsub.Receive(ctx); err != nil {
+		return err
+	}
+	for message := range pubsub.Channel() {
+		var e Event
+		if err := json.Unmarshal([]byte(message.Payload), &e); err != nil {
+			log.Printf("invalid Redis event: %v", err)
+			continue
+		}
+		handle(e)
+	}
+	return ctx.Err()
+}
+func (b *RedisBus) Close() error { return b.client.Close() }
+
+type Hub struct {
+	mu    sync.RWMutex
+	rooms map[string]map[*Client]struct{}
+	model ModelClient
+	bus   Publisher
+}
+
+func NewHub(model ModelClient, bus Publisher) *Hub {
+	return &Hub{rooms: make(map[string]map[*Client]struct{}), model: model, bus: bus}
+}
+func (h *Hub) Add(c *Client, room string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c.room != "" {
+		delete(h.rooms[c.room], c)
+		if len(h.rooms[c.room]) == 0 {
+			delete(h.rooms, c.room)
+		}
+	}
+	c.room = room
+	if h.rooms[room] == nil {
+		h.rooms[room] = make(map[*Client]struct{})
+	}
+	h.rooms[room][c] = struct{}{}
+}
+func (h *Hub) Remove(c *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if room := c.room; room != "" {
+		delete(h.rooms[room], c)
+		if len(h.rooms[room]) == 0 {
+			delete(h.rooms, room)
+		}
+		c.room = ""
+	}
+}
+func (h *Hub) Broadcast(e Event) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.rooms[e.RoomID] {
+		select {
+		case c.send <- e:
+		default:
+			go c.close()
+		}
+	}
 }
 
 type Client struct {
-	ID   string
-	hub  *Hub
-	conn *websocket.Conn
-	send chan Message
+	id          string
+	userID      string
+	room        string
+	characterID string
+	conn        *websocket.Conn
+	hub         *Hub
+	send        chan Event
+	closed      sync.Once
 }
 
-type Hub struct {
-	clients    map[*Client]struct{}
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan Message
-}
-
-func (h *Hub) run() {
+func (c *Client) close() { c.closed.Do(func() { c.hub.Remove(c); close(c.send); _ = c.conn.Close() }) }
+func (c *Client) readPump() {
+	defer c.close()
+	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error { return c.conn.SetReadDeadline(time.Now().Add(pongWait)) })
 	for {
-		select {
-		case client := <-h.register:
-			h.clients[client] = struct{}{}
-		case client := <-h.unregister:
-			if _, ok := h.clients[client]; ok {
-				fmt.Printf("Client %p discontected\n", client)
-				delete(h.clients, client)
-				close(client.send)
+		_, data, err := c.conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var req ClientMessage
+		if err := json.Unmarshal(data, &req); err != nil {
+			c.sendError("invalid JSON")
+			continue
+		}
+		switch req.Type {
+		case "join":
+			if strings.TrimSpace(req.RoomID) == "" || strings.TrimSpace(req.CharacterID) == "" {
+				c.sendError("room_id and character_id are required")
+				continue
 			}
-		case message := <-h.broadcast:
-			for client := range h.clients {
-				select {
-				case client.send <- message:
-				default:
-					// 发送队列已满，移除慢客户端，避免阻塞整个 Hub。
-					delete(h.clients, client)
-					close(client.send)
-				}
+			c.hub.Add(c, strings.TrimSpace(req.RoomID))
+			c.characterID = strings.TrimSpace(req.CharacterID)
+			c.emit(Event{Type: "joined", RoomID: c.room, CharacterID: c.characterID, Sender: c.id})
+		case "chat":
+			if c.room == "" {
+				c.sendError("join a room before chatting")
+				continue
 			}
-
+			if strings.TrimSpace(req.Content) == "" {
+				c.sendError("content is required")
+				continue
+			}
+			c.chat(req.Content)
+		default:
+			c.sendError("type must be join or chat")
 		}
 	}
 }
-
-func (c *Client) readPump() {
-	defer func() {
-		c.conn.Close()
-		c.hub.unregister <- c
-	}()
-
-	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+func (c *Client) chat(content string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	req := ModelRequest{RoomID: c.room, CharacterID: c.characterID, UserID: c.userID, Content: content}
+	err := c.hub.model.Stream(ctx, req, func(token ModelToken) error {
+		if token.Content == "" {
+			return nil
+		}
+		return c.emit(Event{Type: "token", RoomID: c.room, CharacterID: c.characterID, Sender: "assistant", Content: token.Content, Timestamp: time.Now().UTC()})
+	})
+	if err != nil {
+		log.Printf("model stream failed room=%s: %v", c.room, err)
+		c.sendError("model stream failed")
 		return
 	}
-	// ReadMessage 会处理 Pong 控制帧，并调用此回调续期读超时。
-	c.conn.SetPongHandler(func(string) error {
-		fmt.Printf("Client %p -> Pong\n", c)
-		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	})
-
-	for {
-		messageType, data, err := c.conn.ReadMessage()
-		if err != nil {
-			break
-		}
-
-		if messageType != websocket.TextMessage {
-			continue
-		}
-		var request ChatRequest
-		if err := json.Unmarshal(data, &request); err != nil {
-			log.Printf("Client %s 消息不是有效 JSON: %v", c.ID, err)
-			continue
-		}
-		if request.Type != "chat" || strings.TrimSpace(request.Content) == "" {
-			log.Printf("Client %s 消息无效: type 必须为 chat，content 不能为空", c.ID)
-			continue
-		}
-
-		c.hub.broadcast <- Message{
-			Type:      "chat",
-			Sender:    c.ID,
-			Content:   fmt.Sprintf("server say: %s", request.Content),
-			Timestamp: time.Now().UTC(),
-		}
-	}
+	_ = c.emit(Event{Type: "done", RoomID: c.room, CharacterID: c.characterID, Sender: "assistant", Timestamp: time.Now().UTC()})
 }
-
+func (c *Client) emit(e Event) error {
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if c.hub.bus != nil {
+		if err := c.hub.bus.Publish(context.Background(), "chat:room:"+e.RoomID, e); err != nil {
+			log.Printf("redis publish failed: %v", err)
+			c.hub.Broadcast(e)
+		}
+		return nil
+	}
+	c.hub.Broadcast(e)
+	return nil
+}
+func (c *Client) sendError(message string) {
+	_ = c.emit(Event{Type: "error", RoomID: c.room, Content: message, Sender: "system"})
+}
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
-
+	defer func() { ticker.Stop(); c.close() }()
 	for {
 		select {
-		case message, ok := <-c.send:
+		case e, ok := <-c.send:
 			if !ok {
 				return
 			}
-			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				return
-			}
-			if err := c.conn.WriteJSON(message); err != nil {
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteJSON(e); err != nil {
 				return
 			}
 		case <-ticker.C:
-			fmt.Printf("ping -> Client %p\n", c)
-			// Ping 和聊天消息由同一个 goroutine 写入，避免并发写连接。
-			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				return
-			}
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
@@ -149,54 +238,70 @@ func (c *Client) writePump() {
 	}
 }
 
-// upgrader 用于将 HTTP 连接升级为 WebSocket 连接
-var upgrader = websocket.Upgrader{
-	// 为了简化示例，允许所有来源的连接。在生产环境中，请谨慎配置。
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+type MockModel struct{}
+
+func (MockModel) Stream(ctx context.Context, req ModelRequest, send func(ModelToken) error) error {
+	name := req.CharacterID
+	answer := fmt.Sprintf("（%s）我听到了：%s", name, req.Content)
+	for _, r := range []rune(answer) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := send(ModelToken{Content: string(r)}); err != nil {
+			return err
+		}
+		time.Sleep(35 * time.Millisecond)
+	}
+	return nil
 }
+
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func main() {
-
-	hub := &Hub{
-		clients:    make(map[*Client]struct{}),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan Message, 256),
+	addr := env("CHATBOT_ADDR", ":8080")
+	var bus *RedisBus
+	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+		bus = NewRedisBus(redisAddr, os.Getenv("REDIS_PASSWORD"), 0)
+		defer bus.Close()
+		ctx := context.Background()
+		if err := bus.client.Ping(ctx).Err(); err != nil {
+			log.Fatalf("redis unavailable: %v", err)
+		}
 	}
-
-	go hub.run()
-
+	hub := NewHub(MockModel{}, bus)
+	if bus != nil {
+		go func() {
+			for {
+				err := bus.Subscribe(context.Background(), "chat:room:*", hub.Broadcast)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("redis subscribe: %v", err)
+					time.Sleep(time.Second)
+				}
+			}
+		}()
+	}
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(hub, w, r)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("websocket upgrade: %v", err)
+			return
+		}
+		userID := r.URL.Query().Get("user_id")
+		if userID == "" {
+			userID = "guest"
+		}
+		c := &Client{id: fmt.Sprintf("%d", time.Now().UnixNano()), userID: userID, conn: conn, hub: hub, send: make(chan Event, roomQueueSize)}
+		go c.writePump()
+		c.readPump()
 	})
-
-	log.Println("server start: 8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal("server error: ", err)
-	}
+	log.Printf("chatbot gateway listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
-
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println("upgrade error:", err)
-		return
+func env(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-
-	client := &Client{
-		// 每条连接分配一个 ID；它不代表已认证的用户身份。
-		ID:   rand.Text(),
-		hub:  hub,
-		conn: conn,
-		send: make(chan Message, 256),
-	}
-
-	hub.register <- client
-
-	fmt.Printf("Client %p connected\n", client)
-
-	go client.readPump()
-	go client.writePump()
+	return fallback
 }
